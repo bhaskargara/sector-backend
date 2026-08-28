@@ -6,8 +6,8 @@ from app.importers.pharmacy_dataset_importer import PharmacyDatasetImporter
 from app.repositories.regulatory_runtime import _unique_nonempty_values
 
 
-def test_parallel_dataset_config_binds_bank_and_it_tables():
-    for dataset_key in ("bank", "it"):
+def test_parallel_dataset_config_binds_each_sector_dataset_tables():
+    for dataset_key in ("bank", "it", "manufacturing"):
         config = build_dataset_sheet_config(dataset_key)
 
         assert set(PARALLEL_IMPORT_ORDER) == set(config)

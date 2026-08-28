@@ -32,7 +32,7 @@ SHEET_NAME_BY_TABLE = {
     "observation_master": "Observation Master",
 }
 
-SUPPORTED_DATASET_KEYS = {"bank", "common_core", "it", "pharmacy"}
+SUPPORTED_DATASET_KEYS = {"bank", "common_core", "it", "manufacturing", "pharmacy"}
 
 # These are the only workbook tabs used for parallel regulatory datasets.
 # Origin and enum records are generated internally from those records, keeping
