@@ -450,6 +450,7 @@ class PharmacyDatasetImporter:
             self._resolve_placeholder_law_ids(datasets)
             self._materialize_delta_laws_from_provisions(datasets)
             self._normalize_sub_sector_references(datasets)
+            self._expand_multi_sub_sector_provisions(datasets)
             self._materialize_missing_sub_sectors(datasets)
             self._normalize_compliance_area_hierarchy(datasets)
             self._normalize_parent_law_references(datasets)
@@ -1155,6 +1156,151 @@ class PharmacyDatasetImporter:
                 }
             )
             valid_sub_sector_ids.add(sub_sector_id)
+
+    def _expand_multi_sub_sector_provisions(
+        self,
+        datasets: dict[str, list[dict[str, Any]]],
+    ) -> None:
+        """Expand semicolon-separated provision scope into independent control chains.
+
+        The runtime stores one sub-sector ID per provision. Some Manufacturing
+        rows apply to more than one NIC division, so each additional division
+        receives a deterministic clone of the provision and its descendants.
+        """
+        provisions = datasets.get("Provision Master", [])
+        scopes_by_provision: dict[str, list[tuple[str, str]]] = {}
+        expanded_provisions: list[dict[str, Any]] = []
+
+        for provision in provisions:
+            provision_id = provision.get("provision_id")
+            raw_scope = provision.get("sub_sector_id")
+            if not provision_id or not isinstance(raw_scope, str) or ";" not in raw_scope:
+                expanded_provisions.append(provision)
+                continue
+
+            sub_sector_ids = [
+                value.strip()
+                for value in raw_scope.split(";")
+                if value.strip()
+            ]
+            if len(sub_sector_ids) < 2:
+                provision["sub_sector_id"] = sub_sector_ids[0] if sub_sector_ids else None
+                expanded_provisions.append(provision)
+                continue
+
+            scoped_provision_ids: list[tuple[str, str]] = []
+            for index, sub_sector_id in enumerate(sub_sector_ids):
+                scoped_provision_id = (
+                    provision_id if index == 0 else self._scoped_clone_id(provision_id, sub_sector_id)
+                )
+                scoped_provision_ids.append((sub_sector_id, scoped_provision_id))
+                clone = provision if index == 0 else {**provision}
+                clone["provision_id"] = scoped_provision_id
+                clone["sub_sector_id"] = sub_sector_id
+                expanded_provisions.append(clone)
+            scopes_by_provision[provision_id] = scoped_provision_ids
+
+        if not scopes_by_provision:
+            return
+
+        datasets["Provision Master"] = expanded_provisions
+        self._clone_provision_area_maps(datasets, scopes_by_provision)
+        compliance_scopes = self._clone_compliance_requirements(datasets, scopes_by_provision)
+        audit_scopes = self._clone_audit_procedures(datasets, compliance_scopes)
+        self._clone_audit_children(datasets, "Evidence Master", "evidence_id", audit_scopes)
+        self._clone_audit_children(datasets, "Observation Master", "observation_id", audit_scopes)
+
+    @staticmethod
+    def _scoped_clone_id(base_id: str, sub_sector_id: str) -> str:
+        return f"{base_id}--{sub_sector_id}"
+
+    def _clone_provision_area_maps(
+        self,
+        datasets: dict[str, list[dict[str, Any]]],
+        scopes_by_provision: dict[str, list[tuple[str, str]]],
+    ) -> None:
+        records = datasets.get("Provision_ComplianceArea_Map", [])
+        clones = list(records)
+        for record in records:
+            provision_id = record.get("provision_id")
+            for sub_sector_id, scoped_provision_id in scopes_by_provision.get(provision_id, [])[1:]:
+                clone = {**record}
+                clone["map_id"] = self._scoped_clone_id(record["map_id"], sub_sector_id)
+                clone["provision_id"] = scoped_provision_id
+                clones.append(clone)
+        datasets["Provision_ComplianceArea_Map"] = clones
+
+    def _clone_compliance_requirements(
+        self,
+        datasets: dict[str, list[dict[str, Any]]],
+        scopes_by_provision: dict[str, list[tuple[str, str]]],
+    ) -> dict[str, list[tuple[str, str]]]:
+        records = datasets.get("Compliance Requirement Master", [])
+        clones = list(records)
+        scopes_by_compliance: dict[str, list[tuple[str, str]]] = {}
+        for record in records:
+            provision_id = record.get("provision_id")
+            compliance_id = record.get("compliance_id")
+            if not compliance_id or provision_id not in scopes_by_provision:
+                continue
+            scoped_compliance_ids: list[tuple[str, str]] = []
+            for index, (sub_sector_id, scoped_provision_id) in enumerate(scopes_by_provision[provision_id]):
+                scoped_compliance_id = (
+                    compliance_id if index == 0 else self._scoped_clone_id(compliance_id, sub_sector_id)
+                )
+                scoped_compliance_ids.append((sub_sector_id, scoped_compliance_id))
+                if index:
+                    clone = {**record}
+                    clone["compliance_id"] = scoped_compliance_id
+                    clone["provision_id"] = scoped_provision_id
+                    clones.append(clone)
+            scopes_by_compliance[compliance_id] = scoped_compliance_ids
+        datasets["Compliance Requirement Master"] = clones
+        return scopes_by_compliance
+
+    def _clone_audit_procedures(
+        self,
+        datasets: dict[str, list[dict[str, Any]]],
+        scopes_by_compliance: dict[str, list[tuple[str, str]]],
+    ) -> dict[str, list[tuple[str, str]]]:
+        records = datasets.get("Audit Procedure Master", [])
+        clones = list(records)
+        scopes_by_audit: dict[str, list[tuple[str, str]]] = {}
+        for record in records:
+            compliance_id = record.get("compliance_id")
+            audit_id = record.get("audit_id")
+            if not audit_id or compliance_id not in scopes_by_compliance:
+                continue
+            scoped_audit_ids: list[tuple[str, str]] = []
+            for index, (sub_sector_id, scoped_compliance_id) in enumerate(scopes_by_compliance[compliance_id]):
+                scoped_audit_id = audit_id if index == 0 else self._scoped_clone_id(audit_id, sub_sector_id)
+                scoped_audit_ids.append((sub_sector_id, scoped_audit_id))
+                if index:
+                    clone = {**record}
+                    clone["audit_id"] = scoped_audit_id
+                    clone["compliance_id"] = scoped_compliance_id
+                    clones.append(clone)
+            scopes_by_audit[audit_id] = scoped_audit_ids
+        datasets["Audit Procedure Master"] = clones
+        return scopes_by_audit
+
+    def _clone_audit_children(
+        self,
+        datasets: dict[str, list[dict[str, Any]]],
+        sheet_name: str,
+        id_field: str,
+        scopes_by_audit: dict[str, list[tuple[str, str]]],
+    ) -> None:
+        records = datasets.get(sheet_name, [])
+        clones = list(records)
+        for record in records:
+            audit_id = record.get("audit_id")
+            for sub_sector_id, scoped_audit_id in scopes_by_audit.get(audit_id, [])[1:]:
+                clone = {**record}
+                clone[id_field] = self._scoped_clone_id(record[id_field], sub_sector_id)
+                clone["audit_id"] = scoped_audit_id
+                clones.append(clone)
+        datasets[sheet_name] = clones
 
     def _materialize_delta_laws_from_provisions(
         self,

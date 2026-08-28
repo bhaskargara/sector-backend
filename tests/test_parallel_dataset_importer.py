@@ -71,3 +71,33 @@ def test_evidence_templates_are_deduplicated_in_workbook_order():
 def test_applicability_matrix_is_optional_for_parallel_sector_workbooks():
     importer = ParallelRegulatoryDatasetImporter(db=None, dataset_key="manufacturing")
     assert importer.optional_workbook_sheets == {"Applicability Matrix"}
+
+
+def test_multi_sub_sector_provision_expands_its_control_chain():
+    importer = PharmacyDatasetImporter(db=None)
+    datasets = {
+        "Provision Master": [
+            {"provision_id": "PROV001", "sub_sector_id": "MFG-SUB010; MFG-SUB011"}
+        ],
+        "Provision_ComplianceArea_Map": [
+            {"map_id": "MAP001", "provision_id": "PROV001"}
+        ],
+        "Compliance Requirement Master": [
+            {"compliance_id": "COMP001", "provision_id": "PROV001"}
+        ],
+        "Audit Procedure Master": [
+            {"audit_id": "AUD001", "compliance_id": "COMP001"}
+        ],
+        "Evidence Master": [{"evidence_id": "EVD001", "audit_id": "AUD001"}],
+        "Observation Master": [{"observation_id": "OBS001", "audit_id": "AUD001"}],
+    }
+
+    importer._expand_multi_sub_sector_provisions(datasets)
+
+    assert [row["sub_sector_id"] for row in datasets["Provision Master"]] == [
+        "MFG-SUB010",
+        "MFG-SUB011",
+    ]
+    assert datasets["Compliance Requirement Master"][1]["provision_id"] == "PROV001--MFG-SUB011"
+    assert datasets["Audit Procedure Master"][1]["compliance_id"] == "COMP001--MFG-SUB011"
+    assert datasets["Evidence Master"][1]["audit_id"] == "AUD001--MFG-SUB011"
