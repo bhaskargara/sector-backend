@@ -1,5 +1,6 @@
 from app.importers.parallel_dataset_importer import (
     PARALLEL_IMPORT_ORDER,
+    ParallelRegulatoryDatasetImporter,
     build_dataset_sheet_config,
 )
 from app.importers.pharmacy_dataset_importer import PharmacyDatasetImporter
@@ -53,3 +54,8 @@ def test_evidence_templates_are_deduplicated_in_workbook_order():
         "Evidence A",
         "Evidence B",
     ]
+
+
+def test_applicability_matrix_is_optional_for_parallel_sector_workbooks():
+    importer = ParallelRegulatoryDatasetImporter(db=None, dataset_key="manufacturing")
+    assert importer.optional_workbook_sheets == {"Applicability Matrix"}

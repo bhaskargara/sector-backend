@@ -96,9 +96,9 @@ class ParallelRegulatoryDatasetImporter(PharmacyDatasetImporter):
             dataset_sheets=build_dataset_sheet_config(dataset_key),
             import_order=PARALLEL_IMPORT_ORDER,
             log_imports=False,
-            optional_workbook_sheets=(
-                {"Applicability Matrix"} if dataset_key == "pharmacy" else set()
-            ),
+            # Older validated sector workbooks do not always include this
+            # derived tab. Runtime scope is determined from Law/Provision data.
+            optional_workbook_sheets={"Applicability Matrix"},
         )
 
 
