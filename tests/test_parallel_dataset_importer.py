@@ -37,6 +37,18 @@ def test_bank_short_sub_sector_reference_is_resolved():
     assert datasets["Provision Master"][0]["sub_sector_id"] == "BANKSUB001"
 
 
+def test_all_provision_sub_sector_marker_becomes_sector_wide():
+    importer = PharmacyDatasetImporter(db=None)
+    datasets = {
+        "Sub-Sector Master": [],
+        "Provision Master": [{"provision_id": "PROV001", "sub_sector_id": "All"}],
+    }
+
+    importer._normalize_sub_sector_references(datasets)
+
+    assert datasets["Provision Master"][0]["sub_sector_id"] is None
+
+
 def test_blank_law_sub_sector_means_sector_wide_scope():
     importer = PharmacyDatasetImporter(db=None)
     assert (

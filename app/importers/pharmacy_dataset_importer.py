@@ -1072,6 +1072,13 @@ class PharmacyDatasetImporter:
         self,
         datasets: dict[str, list[dict[str, Any]]],
     ) -> None:
+        for record in datasets.get("Provision Master", []):
+            sub_sector_id = record.get("sub_sector_id")
+            if isinstance(sub_sector_id, str) and sub_sector_id.strip().casefold() == "all":
+                # Workbooks use "All" to mean sector-wide. The database uses
+                # NULL so it is not mistaken for a sub-sector foreign key.
+                record["sub_sector_id"] = None
+
         sub_sectors = datasets.get("Sub-Sector Master", [])
         if not sub_sectors:
             return
