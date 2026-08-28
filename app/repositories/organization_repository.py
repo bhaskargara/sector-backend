@@ -15,7 +15,7 @@ from app.models.organization import (
     FirmUser,
     PlatformAdminUser,
 )
-from app.models.regulatory import SectorMaster, SubSectorMaster
+from app.repositories.regulatory_runtime import get_scope
 from app.schemas.organization import (
     ClientCreate,
     ClientUpdate,
@@ -583,16 +583,12 @@ def get_client(db: Session, firm_id: str, client_id: str) -> ClientMaster | None
 
 def _validate_client_scope(
     db: Session,
+    dataset_key: str,
     sector_id: str,
     sub_sector_id: str,
 ) -> None:
-    sector = db.get(SectorMaster, sector_id)
-    if not sector:
-        raise ValueError(f"Unknown sector_id: {sector_id}")
-
-    sub_sector = db.get(SubSectorMaster, sub_sector_id)
-    if not sub_sector or sub_sector.sector_id != sector_id:
-        raise ValueError(f"Unknown sub_sector_id for sector {sector_id}: {sub_sector_id}")
+    if not get_scope(db, dataset_key, sector_id, sub_sector_id):
+        raise ValueError("The selected sector and sub-sector are not available in this regulatory dataset")
 
 
 def create_client(db: Session, firm_id: str, payload: ClientCreate) -> ClientMaster:
@@ -600,7 +596,7 @@ def create_client(db: Session, firm_id: str, payload: ClientCreate) -> ClientMas
     if not firm:
         raise ValueError(f"Unknown firm_id: {firm_id}")
 
-    _validate_client_scope(db, payload.sector_id, payload.sub_sector_id)
+    _validate_client_scope(db, payload.dataset_key, payload.sector_id, payload.sub_sector_id)
     client = ClientMaster(
         client_id=_new_id("CLT"),
         firm_id=firm_id,
@@ -650,21 +646,22 @@ def update_client(
         return None
 
     values = payload.model_dump(exclude_unset=True)
+    next_dataset_key = values.get("dataset_key", client.dataset_key)
     next_sector_id = values.get("sector_id", client.sector_id)
     next_sub_sector_id = values.get("sub_sector_id", client.sub_sector_id)
-    if "sector_id" in values or "sub_sector_id" in values:
+    if "dataset_key" in values or "sector_id" in values or "sub_sector_id" in values:
         audit_exists = db.scalar(
             select(AuditEngagement.audit_id).where(AuditEngagement.client_id == client.client_id).limit(1)
         )
         scope_changed = (
-            next_sector_id != client.sector_id or next_sub_sector_id != client.sub_sector_id
+            next_dataset_key != client.dataset_key or next_sector_id != client.sector_id or next_sub_sector_id != client.sub_sector_id
         )
         if audit_exists and scope_changed:
             raise ValueError(
                 "Sector and sub-sector cannot be changed after an audit has been created for this client"
             )
-    if "sector_id" in values or "sub_sector_id" in values:
-        _validate_client_scope(db, next_sector_id, next_sub_sector_id)
+    if "dataset_key" in values or "sector_id" in values or "sub_sector_id" in values:
+        _validate_client_scope(db, next_dataset_key, next_sector_id, next_sub_sector_id)
 
     previous_client_name = client.client_name
     for field, value in values.items():
@@ -715,7 +712,8 @@ def delete_client(db: Session, firm_id: str, client_id: str) -> bool:
     return True
 
 
-def serialize_client(client: ClientMaster) -> dict[str, str | None]:
+def serialize_client(db: Session, client: ClientMaster) -> dict[str, str | None]:
+    scope = get_scope(db, client.dataset_key, client.sector_id, client.sub_sector_id)
     return {
         "client_id": client.client_id,
         "firm_id": client.firm_id,
@@ -724,12 +722,13 @@ def serialize_client(client: ClientMaster) -> dict[str, str | None]:
         "contact_email": client.contact_email,
         "phone": client.phone,
         "city": client.city,
+        "dataset_key": client.dataset_key,
         "sector_id": client.sector_id,
         "sub_sector_id": client.sub_sector_id,
         "status": client.status,
         "remarks": client.remarks,
-        "sector_name": client.sector.sector_name if client.sector else None,
-        "sub_sector_name": client.sub_sector.sub_sector_name if client.sub_sector else None,
+        "sector_name": scope.sector_name if scope else None,
+        "sub_sector_name": scope.sub_sector_name if scope else None,
         "enterprise_id": client.enterprise_id,
     }
 

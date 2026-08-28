@@ -10,11 +10,15 @@ from typing import Any
 
 import pandas as pd
 from sqlalchemy import delete
+from sqlalchemy.sql.schema import Table
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
-from app.models.regulatory import (
+# The generic parser is retained for the parallel importer only.  Concrete
+# table bindings are injected by parallel_dataset_importer; it no longer loads
+# the retired public regulatory ORM models.
+(
     AuditProcedureMaster,
     ComplianceAreaMaster,
     ComplianceRequirementMaster,
@@ -30,7 +34,7 @@ from app.models.regulatory import (
     RegulatoryAuthorityMaster,
     SectorMaster,
     SubSectorMaster,
-)
+) = (None,) * 15
 
 DATASET_SHEETS: dict[str, dict[str, Any]] = {
     "Sector Master": {
@@ -121,6 +125,19 @@ DATASET_SHEETS: dict[str, dict[str, Any]] = {
             ("law_id", "Law Master", False),
             ("compliance_area_id", "Compliance Area Master", False),
         ],
+    },
+    "Applicability Matrix": {
+        "model": None,
+        "pk": ["sector", "sub_sector", "law_id"],
+        "columns": {
+            "Sector": "sector",
+            "Sub-Sector": "sub_sector",
+            "Law ID": "law_id",
+            "Mandatory": "mandatory",
+            "Conditional": "conditional",
+            "Applicability Trigger": "applicability_trigger",
+        },
+        "fks": [("law_id", "Law Master", False)],
     },
     "Origin Master": {
         "model": OriginMaster,
@@ -350,8 +367,19 @@ class ImportSummary:
 
 
 class PharmacyDatasetImporter:
-    def __init__(self, db: Session):
+    def __init__(
+        self,
+        db: Session,
+        dataset_sheets: dict[str, dict[str, Any]] | None = None,
+        import_order: list[str] | None = None,
+        log_imports: bool = True,
+        optional_workbook_sheets: set[str] | None = None,
+    ):
         self.db = db
+        self.dataset_sheets = dataset_sheets or DATASET_SHEETS
+        self.import_order = import_order or IMPORT_ORDER
+        self.log_imports = log_imports
+        self.optional_workbook_sheets = optional_workbook_sheets or set()
 
     def import_workbook(self, workbook_path: str, mode: str = "upsert") -> ImportSummary:
         path = Path(workbook_path)
@@ -364,23 +392,61 @@ class PharmacyDatasetImporter:
             workbook_sheets = pd.ExcelFile(path, engine="openpyxl").sheet_names
             sheet_lookup = self._build_sheet_lookup(workbook_sheets)
             self._validate_sheets(sheet_lookup)
-            for sheet_name in IMPORT_ORDER:
+            for sheet_name in self.import_order:
                 if sheet_name in {"Origin Master", "Enum Master"} and sheet_name not in sheet_lookup:
+                    continue
+                if (
+                    sheet_name in self.optional_workbook_sheets
+                    and sheet_name not in sheet_lookup
+                ):
+                    datasets[sheet_name] = []
+                    summary.rows_read[sheet_name] = 0
                     continue
                 records = self._read_sheet(path, sheet_name, sheet_lookup[sheet_name])
                 datasets[sheet_name] = records
                 summary.rows_read[sheet_name] = len(records)
                 self._validate_duplicate_keys(sheet_name, records)
-            if self._is_modern_sector_dataset(workbook_sheets):
-                self._apply_dataset_prefix(datasets, self._derive_dataset_prefix(datasets))
+            # Parallel datasets isolate each sector in its own PostgreSQL schema,
+            # so workbook IDs must remain untouched.  This also keeps IDs stable
+            # for traceability back to the published sector workbook.
+            # Frozen workbooks can include an Origin Master which predates
+            # later validation records. Merge every origin referenced by the
+            # actual import rows, rather than rejecting those valid rows.
+            generated_origins = self._build_origin_master_records(datasets)
             if "Origin Master" not in datasets:
-                datasets["Origin Master"] = self._build_origin_master_records(datasets)
-                summary.rows_read["Origin Master"] = len(datasets["Origin Master"])
-                self._validate_duplicate_keys("Origin Master", datasets["Origin Master"])
+                datasets["Origin Master"] = generated_origins
+            else:
+                existing_origin_codes = {
+                    record["origin_code"]
+                    for record in datasets["Origin Master"]
+                    if record.get("origin_code")
+                }
+                datasets["Origin Master"].extend(
+                    record
+                    for record in generated_origins
+                    if record["origin_code"] not in existing_origin_codes
+                )
+            summary.rows_read["Origin Master"] = len(datasets["Origin Master"])
+            self._validate_duplicate_keys("Origin Master", datasets["Origin Master"])
+            # Keep the frozen Enum Master as the source of descriptions, while
+            # adding values which are present in the current regulatory rows.
+            generated_enums = self._build_enum_master_records(datasets)
             if "Enum Master" not in datasets:
-                datasets["Enum Master"] = self._build_enum_master_records(datasets)
-                summary.rows_read["Enum Master"] = len(datasets["Enum Master"])
-                self._validate_duplicate_keys("Enum Master", datasets["Enum Master"])
+                datasets["Enum Master"] = generated_enums
+            else:
+                existing_enum_keys = {
+                    (record["enum_type"], record["allowed_value"])
+                    for record in datasets["Enum Master"]
+                    if record.get("enum_type") and record.get("allowed_value")
+                }
+                datasets["Enum Master"].extend(
+                    record
+                    for record in generated_enums
+                    if (record["enum_type"], record["allowed_value"])
+                    not in existing_enum_keys
+                )
+            summary.rows_read["Enum Master"] = len(datasets["Enum Master"])
+            self._validate_duplicate_keys("Enum Master", datasets["Enum Master"])
             self._resolve_placeholder_law_ids(datasets)
             self._materialize_delta_laws_from_provisions(datasets)
             self._normalize_sub_sector_references(datasets)
@@ -395,7 +461,7 @@ class PharmacyDatasetImporter:
             self._validate_enum_values(datasets)
             if mode == "truncate":
                 self._truncate_tables()
-            for sheet_name in IMPORT_ORDER:
+            for sheet_name in self.import_order:
                 inserted = self._persist_sheet(sheet_name, datasets[sheet_name], mode)
                 summary.rows_inserted[sheet_name] = inserted
                 summary.rows_skipped[sheet_name] = max(
@@ -416,7 +482,7 @@ class PharmacyDatasetImporter:
 
     def _build_sheet_lookup(self, workbook_sheets: list[str]) -> dict[str, str]:
         sheet_lookup: dict[str, str] = {}
-        for sheet_name in IMPORT_ORDER:
+        for sheet_name in self.import_order:
             if sheet_name in workbook_sheets:
                 sheet_lookup[sheet_name] = sheet_name
                 continue
@@ -429,8 +495,10 @@ class PharmacyDatasetImporter:
     def _validate_sheets(self, sheet_lookup: dict[str, str]) -> None:
         missing = [
             sheet
-            for sheet in IMPORT_ORDER
-            if sheet not in sheet_lookup and sheet not in {"Origin Master", "Enum Master"}
+            for sheet in self.import_order
+            if sheet not in sheet_lookup
+            and sheet not in {"Origin Master", "Enum Master"}
+            and sheet not in self.optional_workbook_sheets
         ]
         if missing:
             raise ValueError(f"Missing required sheets: {', '.join(missing)}")
@@ -456,7 +524,13 @@ class PharmacyDatasetImporter:
 
     def _read_law_sheet(self, path: Path, actual_sheet_name: str) -> list[dict[str, Any]]:
         df = pd.read_excel(path, sheet_name=actual_sheet_name, engine="openpyxl", dtype=object)
-        if "Domain ID" not in df.columns:
+        extended_law_columns = {
+            "Domain ID",
+            "Sector ID",
+            "Regulatory Authority ID",
+            "Law Title",
+        }
+        if not extended_law_columns.intersection(df.columns):
             return self._read_sheet_standard(df, "Law Master")
 
         sector_lookup = self._load_lookup(path, "Sector Master", "SectorID", "Sector Name")
@@ -675,7 +749,7 @@ class PharmacyDatasetImporter:
         return records
 
     def _read_sheet_standard(self, df: pd.DataFrame, sheet_name: str) -> list[dict[str, Any]]:
-        config = DATASET_SHEETS[sheet_name]
+        config = self.dataset_sheets[sheet_name]
         optional_columns = set(config.get("optional_columns", []))
         missing_columns = [
             column
@@ -697,6 +771,10 @@ class PharmacyDatasetImporter:
                 for key, value in record.items()
             }
             if not self._has_payload(normalized):
+                continue
+            # Some frozen workbooks retain blank quarantine/QA rows.  They are
+            # not master-data records and cannot be imported without a key.
+            if any(normalized.get(column) is None for column in config["pk"]):
                 continue
             if "active" in normalized and normalized["active"] is None:
                 normalized["active"] = "Yes"
@@ -786,7 +864,10 @@ class PharmacyDatasetImporter:
             if raw_sub_sector == "All":
                 return "All"
             sub_sector_id = self._extract_sub_sector_id(remarks)
-            return sub_sector_lookup.get(sub_sector_id, raw_sub_sector)
+            # An empty sub-sector on a law means it applies at sector level.
+            # When remarks carry a SUBnnn delta reference, retain that more
+            # precise scope; otherwise represent the sector-wide scope as All.
+            return sub_sector_lookup.get(sub_sector_id, "All")
         if raw_sub_sector in sub_sector_lookup:
             return sub_sector_lookup[raw_sub_sector]
         return raw_sub_sector
@@ -1000,11 +1081,24 @@ class PharmacyDatasetImporter:
             if record.get("sub_sector_id")
         }
         alias_map: dict[str, str] = {}
+        short_id_candidates: dict[str, set[str]] = {}
         for sub_sector_id in valid_sub_sector_ids:
             alias_map[sub_sector_id] = sub_sector_id
             match = re.fullmatch(r"([A-Z0-9]+)-[A-Z]+SUB(\d+)", sub_sector_id)
             if match:
                 alias_map[f"{match.group(1)}-SUB{match.group(2)}"] = sub_sector_id
+            suffix_match = re.search(r"SUB(\d+)$", sub_sector_id)
+            if suffix_match:
+                short_id_candidates.setdefault(
+                    f"SUB{suffix_match.group(1)}",
+                    set(),
+                ).add(sub_sector_id)
+
+        # Some sector workbooks use BANKSUB001 in the master but SUB001 in
+        # delta rows. Resolve the short form only when it maps unambiguously.
+        for short_id, candidates in short_id_candidates.items():
+            if len(candidates) == 1:
+                alias_map[short_id] = next(iter(candidates))
 
         for record in datasets.get("Provision Master", []):
             sub_sector_id = record.get("sub_sector_id")
@@ -1404,7 +1498,7 @@ class PharmacyDatasetImporter:
         sheet_name: str,
         records: list[dict[str, Any]],
     ) -> None:
-        pk = DATASET_SHEETS[sheet_name]["pk"]
+        pk = self.dataset_sheets[sheet_name]["pk"]
         seen: set[tuple[Any, ...]] = set()
         duplicates: list[tuple[Any, ...]] = []
         for record in records:
@@ -1421,12 +1515,12 @@ class PharmacyDatasetImporter:
 
     def _validate_foreign_keys(self, datasets: dict[str, list[dict[str, Any]]]) -> None:
         key_sets = {
-            sheet_name: {record[DATASET_SHEETS[sheet_name]["pk"][0]] for record in records}
+            sheet_name: {record[self.dataset_sheets[sheet_name]["pk"][0]] for record in records}
             for sheet_name, records in datasets.items()
-            if len(DATASET_SHEETS[sheet_name]["pk"]) == 1
+            if len(self.dataset_sheets[sheet_name]["pk"]) == 1
         }
         for sheet_name, records in datasets.items():
-            for child_column, parent_sheet, nullable in DATASET_SHEETS[sheet_name].get(
+            for child_column, parent_sheet, nullable in self.dataset_sheets[sheet_name].get(
                 "fks",
                 [],
             ):
@@ -1462,8 +1556,9 @@ class PharmacyDatasetImporter:
                 )
 
     def _truncate_tables(self) -> None:
-        for sheet_name in reversed(IMPORT_ORDER):
-            self.db.execute(delete(DATASET_SHEETS[sheet_name]["model"]))
+        for sheet_name in reversed(self.import_order):
+            model = self.dataset_sheets[sheet_name]["model"]
+            self.db.execute(delete(model))
 
     def _persist_sheet(
         self,
@@ -1473,17 +1568,21 @@ class PharmacyDatasetImporter:
     ) -> int:
         if not records:
             return 0
-        model = DATASET_SHEETS[sheet_name]["model"]
-        pk = DATASET_SHEETS[sheet_name]["pk"]
+        model = self.dataset_sheets[sheet_name]["model"]
+        pk = self.dataset_sheets[sheet_name]["pk"]
         if sheet_name == "Law Master":
             records = self._sort_law_records_for_insert(records)
+        table = model.__table__ if hasattr(model, "__table__") else model
         if mode == "truncate":
-            self.db.bulk_insert_mappings(model, records)
+            if hasattr(model, "__mapper__"):
+                self.db.bulk_insert_mappings(model, records)
+            else:
+                self.db.execute(table.insert(), records)
             return len(records)
-        stmt = pg_insert(model).values(records)
+        stmt = pg_insert(table).values(records)
         update_columns = {
             column.name: stmt.excluded[column.name]
-            for column in model.__table__.columns
+            for column in table.columns
             if column.name not in pk and column.name != "created_at"
         }
         self.db.execute(
@@ -1524,6 +1623,8 @@ class PharmacyDatasetImporter:
         return ordered
 
     def _store_log(self, summary: ImportSummary) -> None:
+        if not self.log_imports:
+            return
         self.db.add(
             ImportLog(
                 workbook_path=summary.workbook_path,
@@ -1550,24 +1651,3 @@ class PharmacyDatasetImporter:
                 return None
             return None if cleaned.lower() in NULL_MARKERS else cleaned
         return value
-
-
-def import_dataset(workbook_path: str, mode: str = "upsert") -> ImportSummary:
-    db = SessionLocal()
-    try:
-        return PharmacyDatasetImporter(db).import_workbook(workbook_path, mode=mode)
-    finally:
-        db.close()
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Import Pharmacy Production Dataset v1.0")
-    parser.add_argument("workbook", help="Path to Pharmacy_Production_Dataset_v1.0.xlsx")
-    parser.add_argument("--mode", choices=["upsert", "truncate"], default="upsert")
-    args = parser.parse_args()
-    summary = import_dataset(args.workbook, mode=args.mode)
-    print(json.dumps(summary.as_dict(), indent=2))
-
-
-if __name__ == "__main__":
-    main()

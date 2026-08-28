@@ -47,6 +47,8 @@ class AuditEngagementItemRead(ORMBase):
     item_id: str
     audit_id: str
     law_id: str | None = None
+    parent_law_id: str | None = None
+    parent_law_name: str | None = None
     law_name: str | None = None
     regulator: str | None = None
     authority_level: str | None = None
@@ -71,6 +73,9 @@ class AuditEngagementItemRead(ORMBase):
     priority: str | None = None
     risk_level: str | None = None
     origin: str | None = None
+    source_scope: str
+    applicability_scope: str
+    dataset_key: str
     status: str
     auditor_remarks: str | None = None
     observation_notes: str | None = None
@@ -89,6 +94,7 @@ class AuditEngagementRead(ORMBase):
     period_start: date | None = None
     period_end: date | None = None
     status: str
+    dataset_key: str
     sector_id: str
     sub_sector_id: str
     client_name: str
@@ -111,6 +117,7 @@ class AuditLawSummary(BaseModel):
     parent_law_name: str | None = None
     law_name: str
     origin_scope: str | None = None
+    applicability_scope: str | None = None
     regulator: str | None = None
     authority_level: str | None = None
     document_type: str | None = None
@@ -124,5 +131,6 @@ class AuditProvisionSummary(BaseModel):
     provision_name: str
     statutory_reference: str | None = None
     origin_scope: str | None = None
+    applicability_scope: str | None = None
     total_items: int
     completed_items: int

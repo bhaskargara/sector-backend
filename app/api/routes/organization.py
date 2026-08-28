@@ -363,7 +363,7 @@ def remove_user(firm_id: str, user_id: str, db: Session = Depends(get_db)):
 
 @router.get("/firms/{firm_id}/clients", response_model=list[ClientRead])
 def get_firm_clients(firm_id: str, db: Session = Depends(get_db)):
-    return [serialize_client(client) for client in list_clients(db, firm_id)]
+    return [serialize_client(db, client) for client in list_clients(db, firm_id)]
 
 
 @router.post(
@@ -380,7 +380,7 @@ def post_firm_client(
         client = create_client(db, firm_id, payload)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    return serialize_client(client)
+    return serialize_client(db, client)
 
 
 @router.get("/firms/{firm_id}/clients/{client_id}", response_model=ClientRead)
@@ -388,7 +388,7 @@ def get_firm_client(firm_id: str, client_id: str, db: Session = Depends(get_db))
     client = get_client(db, firm_id, client_id)
     if not client:
         raise not_found(f"Client not found: {client_id}")
-    return serialize_client(client)
+    return serialize_client(db, client)
 
 
 @router.patch("/firms/{firm_id}/clients/{client_id}", response_model=ClientRead)
@@ -404,7 +404,7 @@ def patch_firm_client(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if not client:
         raise not_found(f"Client not found: {client_id}")
-    return serialize_client(client)
+    return serialize_client(db, client)
 
 
 @router.delete("/firms/{firm_id}/clients/{client_id}", status_code=status.HTTP_204_NO_CONTENT)

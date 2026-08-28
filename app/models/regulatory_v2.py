@@ -4,6 +4,7 @@ from collections.abc import Iterable
 
 from sqlalchemy import (
     Column,
+    DateTime,
     ForeignKey,
     Index,
     Integer,
@@ -12,18 +13,31 @@ from sqlalchemy import (
     String,
     Table,
     Text,
+    func,
 )
 
 from app.core.database import Base
-from app.models.base import TimestampMixin
-
-REGULATORY_DATASET_SCHEMAS = ("common_core", "pharmacy")
+# Each data source lives in its own PostgreSQL schema.  IDs in the workbooks
+# are intentionally local to that schema (for example, LAW001 can exist in IT
+# and Bank without a collision).
+REGULATORY_DATASET_SCHEMAS = ("common_core", "pharmacy", "bank", "it")
 
 
 def _timestamp_columns() -> list[Column]:
     return [
-        Column("created_at", TimestampMixin.created_at.column.copy()),
-        Column("updated_at", TimestampMixin.updated_at.column.copy()),
+        Column(
+            "created_at",
+            DateTime(timezone=True),
+            server_default=func.now(),
+            nullable=False,
+        ),
+        Column(
+            "updated_at",
+            DateTime(timezone=True),
+            server_default=func.now(),
+            onupdate=func.now(),
+            nullable=False,
+        ),
     ]
 
 
@@ -162,6 +176,25 @@ def _regulatory_tables(schema_name: str) -> list[Table]:
         ),
         Column("active_status", String, nullable=False, index=True),
         Column("remarks", Text),
+        *_timestamp_columns(),
+        schema=schema_name,
+    )
+
+    applicability_matrix = Table(
+        "applicability_matrix",
+        metadata,
+        Column("sector", String, primary_key=True),
+        Column("sub_sector", String, primary_key=True),
+        Column(
+            "law_id",
+            String,
+            ForeignKey(f"{schema_name}.law_master.law_id"),
+            primary_key=True,
+            index=True,
+        ),
+        Column("mandatory", String, index=True),
+        Column("conditional", String, index=True),
+        Column("applicability_trigger", Text),
         *_timestamp_columns(),
         schema=schema_name,
     )
@@ -353,6 +386,11 @@ def _regulatory_tables(schema_name: str) -> list[Table]:
         law_master.c.sub_sector,
     )
     Index(
+        f"ix_{schema_name}_applicability_scope",
+        applicability_matrix.c.sector,
+        applicability_matrix.c.sub_sector,
+    )
+    Index(
         f"ix_{schema_name}_compliance_provision_area",
         compliance_requirement_master.c.provision_id,
         compliance_requirement_master.c.compliance_area_id,
@@ -377,6 +415,7 @@ def _regulatory_tables(schema_name: str) -> list[Table]:
         enum_master,
         law_master,
         law_compliance_area_map,
+        applicability_matrix,
         provision_master,
         provision_compliance_area_map,
         compliance_requirement_master,
@@ -397,4 +436,3 @@ def iter_regulatory_tables(schema_name: str | None = None) -> Iterable[Table]:
     if schema_name is None:
         return REGULATORY_V2_TABLES
     return tuple(table for table in REGULATORY_V2_TABLES if table.schema == schema_name)
-

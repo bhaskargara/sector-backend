@@ -1,6 +1,5 @@
-from app.importers.pharmacy_dataset_importer import (
-    PharmacyDatasetImporter,
-    import_dataset,
-)
+"""Workbook import modules.
 
-__all__ = ["PharmacyDatasetImporter", "import_dataset"]
+Use ``app.importers.parallel_dataset_importer`` directly; importing the
+package deliberately has no side effects.
+"""

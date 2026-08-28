@@ -31,6 +31,7 @@ class AuditEngagement(TimestampMixin, Base):
     period_start: Mapped[date | None]
     period_end: Mapped[date | None]
     status: Mapped[str] = mapped_column(default="Draft", nullable=False, index=True)
+    dataset_key: Mapped[str] = mapped_column(nullable=False, index=True)
     sector_id: Mapped[str] = mapped_column(nullable=False, index=True)
     sub_sector_id: Mapped[str] = mapped_column(nullable=False, index=True)
     client_name: Mapped[str] = mapped_column(nullable=False, index=True)
@@ -55,6 +56,8 @@ class AuditEngagementItem(TimestampMixin, Base):
         index=True,
     )
     law_id: Mapped[str | None] = mapped_column(index=True)
+    parent_law_id: Mapped[str | None] = mapped_column(index=True)
+    parent_law_name: Mapped[str | None]
     law_name: Mapped[str | None] = mapped_column(index=True)
     regulator: Mapped[str | None] = mapped_column(index=True)
     authority_level: Mapped[str | None] = mapped_column(index=True)
@@ -79,6 +82,13 @@ class AuditEngagementItem(TimestampMixin, Base):
     priority: Mapped[str | None] = mapped_column(index=True)
     risk_level: Mapped[str | None] = mapped_column(index=True)
     origin: Mapped[str | None] = mapped_column(index=True)
+    source_scope: Mapped[str] = mapped_column(nullable=False, default="SECTOR", index=True)
+    applicability_scope: Mapped[str] = mapped_column(
+        nullable=False,
+        default="SECTOR_WIDE",
+        index=True,
+    )
+    dataset_key: Mapped[str] = mapped_column(nullable=False, index=True)
     status: Mapped[str] = mapped_column(default="Pending", nullable=False, index=True)
     auditor_remarks: Mapped[str | None] = mapped_column(Text)
     observation_notes: Mapped[str | None] = mapped_column(Text)

@@ -6,6 +6,7 @@ class ORMBase(BaseModel):
 
 
 class SectorRead(ORMBase):
+    dataset_key: str
     sector_id: str
     sector_name: str
     description: str | None = None
@@ -14,6 +15,7 @@ class SectorRead(ORMBase):
 
 
 class SubSectorRead(ORMBase):
+    dataset_key: str
     sub_sector_id: str
     sector_id: str
     sub_sector_name: str

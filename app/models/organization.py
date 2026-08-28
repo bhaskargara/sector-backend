@@ -5,7 +5,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 from app.models.base import TimestampMixin
-from app.models.regulatory import SectorMaster, SubSectorMaster
 
 
 class FirmMaster(TimestampMixin, Base):
@@ -124,20 +123,14 @@ class ClientMaster(TimestampMixin, Base):
     contact_email: Mapped[str | None] = mapped_column(index=True)
     phone: Mapped[str | None]
     city: Mapped[str | None] = mapped_column(index=True)
-    sector_id: Mapped[str] = mapped_column(
-        ForeignKey("sector_master.sector_id"),
-        nullable=False,
-        index=True,
+    # Regulatory IDs are local to an independently owned dataset schema.
+    dataset_key: Mapped[str] = mapped_column(
+        ForeignKey("regulatory_dataset.dataset_key"), nullable=False, index=True
     )
-    sub_sector_id: Mapped[str] = mapped_column(
-        ForeignKey("sub_sector_master.sub_sector_id"),
-        nullable=False,
-        index=True,
-    )
+    sector_id: Mapped[str] = mapped_column(nullable=False, index=True)
+    sub_sector_id: Mapped[str] = mapped_column(nullable=False, index=True)
     status: Mapped[str] = mapped_column(default="Draft", nullable=False, index=True)
     remarks: Mapped[str | None] = mapped_column(Text)
 
     firm: Mapped[FirmMaster] = relationship()
     enterprise: Mapped[EnterpriseMaster | None] = relationship()
-    sector: Mapped[SectorMaster] = relationship()
-    sub_sector: Mapped[SubSectorMaster] = relationship()

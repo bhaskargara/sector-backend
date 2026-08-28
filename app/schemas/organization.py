@@ -91,6 +91,7 @@ class ClientCreate(BaseModel):
     contact_email: str | None = None
     phone: str | None = None
     city: str | None = None
+    dataset_key: str
     sector_id: str
     sub_sector_id: str
     status: str = "Draft"
@@ -103,6 +104,7 @@ class ClientUpdate(BaseModel):
     contact_email: str | None = None
     phone: str | None = None
     city: str | None = None
+    dataset_key: str | None = None
     sector_id: str | None = None
     sub_sector_id: str | None = None
     status: str | None = None
@@ -117,6 +119,7 @@ class ClientRead(ORMBase):
     contact_email: str | None = None
     phone: str | None = None
     city: str | None = None
+    dataset_key: str
     sector_id: str
     sub_sector_id: str
     status: str

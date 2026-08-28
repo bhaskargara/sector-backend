@@ -2,21 +2,12 @@ from collections import defaultdict
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import and_, case, func, or_, select
-from sqlalchemy.orm import aliased
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.models.audit import AuditEngagement, AuditEngagementItem, AuditEvidenceAttachment
 from app.models.organization import ClientMaster, FirmEnterpriseEngagement, FirmMaster
-from app.models.regulatory import (
-    AuditProcedureMaster,
-    ComplianceRequirementMaster,
-    EvidenceMaster,
-    LawMaster,
-    ObservationMaster,
-    ProvisionMaster,
-    SectorMaster,
-)
+from app.repositories.regulatory_runtime import compose_control_rows, get_scope
 from app.schemas.audit import AuditEngagementCreate, AuditEngagementUpdate, AuditItemUpdate
 
 UPLOAD_ROOT = Path(__file__).resolve().parents[2] / "uploads" / "audit_evidence"
@@ -27,174 +18,13 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}-{uuid4().hex[:10].upper()}"
 
 
-def _build_evidence_map(db: Session, audit_procedure_ids: set[str]) -> dict[str, list[str]]:
-    if not audit_procedure_ids:
-        return {}
-    rows = db.scalars(
-        select(EvidenceMaster)
-        .where(EvidenceMaster.audit_id.in_(audit_procedure_ids))
-        .order_by(EvidenceMaster.evidence_id)
-    ).all()
-    result: dict[str, list[str]] = defaultdict(list)
-    for row in rows:
-        result[row.audit_id].append(row.evidence_required)
-    return result
-
-
-def _build_evidence_metadata_map(
-    db: Session,
-    audit_procedure_ids: set[str],
-) -> dict[str, dict[str, str | None]]:
-    if not audit_procedure_ids:
-        return {}
-    rows = db.scalars(
-        select(EvidenceMaster)
-        .where(EvidenceMaster.audit_id.in_(audit_procedure_ids))
-        .order_by(EvidenceMaster.evidence_id)
-    ).all()
-    result: dict[str, dict[str, str | None]] = {}
-    for row in rows:
-        entry = result.setdefault(
-            row.audit_id,
-            {"evidence_type": None, "evidence_mandatory": None},
-        )
-        if row.evidence_type and not entry["evidence_type"]:
-            entry["evidence_type"] = row.evidence_type
-        if row.mandatory:
-            if entry["evidence_mandatory"] in {None, "No"} and row.mandatory == "Yes":
-                entry["evidence_mandatory"] = "Yes"
-            elif entry["evidence_mandatory"] is None:
-                entry["evidence_mandatory"] = row.mandatory
-    return result
-
-
-def _build_observation_map(db: Session, audit_procedure_ids: set[str]) -> dict[str, list[str]]:
-    if not audit_procedure_ids:
-        return {}
-    rows = db.scalars(
-        select(ObservationMaster)
-        .where(ObservationMaster.audit_id.in_(audit_procedure_ids))
-        .order_by(ObservationMaster.observation_id)
-    ).all()
-    result: dict[str, list[str]] = defaultdict(list)
-    for row in rows:
-        result[row.audit_id].append(row.observation_template)
-    return result
-
-
-def _build_observation_risk_map(db: Session, audit_procedure_ids: set[str]) -> dict[str, str | None]:
-    if not audit_procedure_ids:
-        return {}
-    rows = db.scalars(
-        select(ObservationMaster)
-        .where(ObservationMaster.audit_id.in_(audit_procedure_ids))
-        .order_by(ObservationMaster.observation_id)
-    ).all()
-    severity_rank = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
-    result: dict[str, str | None] = {}
-    for row in rows:
-        current = result.get(row.audit_id)
-        next_level = row.risk_level
-        if current is None or severity_rank.get(next_level, 0) > severity_rank.get(current, 0):
-            result[row.audit_id] = next_level
-    return result
-
-
 def _serialize_engagement(engagement: AuditEngagement) -> AuditEngagement:
     return engagement
 
 
 def ensure_audit_metadata(db: Session, audit_id: str) -> None:
-    missing_metadata_filter = or_(
-        AuditEngagementItem.regulator.is_(None),
-        AuditEngagementItem.authority_level.is_(None),
-        AuditEngagementItem.document_type.is_(None),
-        AuditEngagementItem.applicability_type.is_(None),
-        AuditEngagementItem.statutory_reference.is_(None),
-        AuditEngagementItem.compliance_frequency.is_(None),
-        AuditEngagementItem.audit_frequency.is_(None),
-        AuditEngagementItem.evidence_type.is_(None),
-        AuditEngagementItem.evidence_mandatory.is_(None),
-        AuditEngagementItem.risk_level.is_(None),
-    )
-    missing_item_ids = db.scalars(
-        select(AuditEngagementItem.item_id).where(
-            AuditEngagementItem.audit_id == audit_id,
-            missing_metadata_filter,
-        )
-    ).all()
-    if not missing_item_ids:
-        return
-
-    items = db.scalars(
-        select(AuditEngagementItem).where(AuditEngagementItem.item_id.in_(missing_item_ids))
-    ).all()
-
-    law_ids = {item.law_id for item in items if item.law_id}
-    provision_ids = {item.provision_id for item in items if item.provision_id}
-    compliance_ids = {item.compliance_id for item in items if item.compliance_id}
-    audit_procedure_ids = {item.audit_procedure_id for item in items if item.audit_procedure_id}
-
-    laws = {
-        row.law_id: row
-        for row in db.scalars(select(LawMaster).where(LawMaster.law_id.in_(law_ids))).all()
-    } if law_ids else {}
-    provisions = {
-        row.provision_id: row
-        for row in db.scalars(select(ProvisionMaster).where(ProvisionMaster.provision_id.in_(provision_ids))).all()
-    } if provision_ids else {}
-    compliances = {
-        row.compliance_id: row
-        for row in db.scalars(
-            select(ComplianceRequirementMaster).where(
-                ComplianceRequirementMaster.compliance_id.in_(compliance_ids)
-            )
-        ).all()
-    } if compliance_ids else {}
-    audit_procedures = {
-        row.audit_id: row
-        for row in db.scalars(
-            select(AuditProcedureMaster).where(AuditProcedureMaster.audit_id.in_(audit_procedure_ids))
-        ).all()
-    } if audit_procedure_ids else {}
-
-    evidence_map = _build_evidence_map(db, set(audit_procedure_ids))
-    evidence_metadata_map = _build_evidence_metadata_map(db, set(audit_procedure_ids))
-    observation_map = _build_observation_map(db, set(audit_procedure_ids))
-    observation_risk_map = _build_observation_risk_map(db, set(audit_procedure_ids))
-
-    updated = False
-    for item in items:
-        law = laws.get(item.law_id or "")
-        provision = provisions.get(item.provision_id or "")
-        compliance = compliances.get(item.compliance_id or "")
-        audit_procedure = audit_procedures.get(item.audit_procedure_id or "")
-        audit_procedure_id = item.audit_procedure_id or ""
-
-        next_values = {
-            "regulator": law.regulator if law else item.regulator,
-            "authority_level": law.authority_level if law else item.authority_level,
-            "document_type": law.document_type if law else item.document_type,
-            "applicability_type": law.applicability_type if law else item.applicability_type,
-            "applicability_trigger": law.applicability_trigger if law else item.applicability_trigger,
-            "statutory_reference": provision.statutory_reference if provision else item.statutory_reference,
-            "compliance_frequency": compliance.frequency if compliance else item.compliance_frequency,
-            "audit_frequency": audit_procedure.audit_frequency if audit_procedure else item.audit_frequency,
-            "evidence_template": "\n".join(evidence_map.get(audit_procedure_id, [])) or item.evidence_template,
-            "evidence_type": (evidence_metadata_map.get(audit_procedure_id, {}) or {}).get("evidence_type") or item.evidence_type,
-            "evidence_mandatory": (evidence_metadata_map.get(audit_procedure_id, {}) or {}).get("evidence_mandatory") or item.evidence_mandatory,
-            "observation_template": "\n".join(observation_map.get(audit_procedure_id, [])) or item.observation_template,
-            "risk_level": observation_risk_map.get(audit_procedure_id) or item.risk_level,
-            "priority": compliance.priority if compliance and compliance.priority else item.priority,
-        }
-
-        for field, value in next_values.items():
-            if getattr(item, field) != value and value is not None:
-                setattr(item, field, value)
-                updated = True
-
-    if updated:
-        db.commit()
+    # New audit snapshots are complete at creation time; no legacy enrichment.
+    return None
 
 
 def _recalculate_progress(db: Session, engagement: AuditEngagement) -> None:
@@ -273,46 +103,14 @@ def create_audit(db: Session, firm_id: str, payload: AuditEngagementCreate) -> A
             f"Audit already exists for {client.client_name} in {payload.audit_period_label}"
         )
 
-    rows = db.execute(
-        select(
-            LawMaster,
-            ProvisionMaster,
-            ComplianceRequirementMaster,
-            AuditProcedureMaster,
-        )
-        .join(SectorMaster, SectorMaster.sector_name == LawMaster.sector)
-        .join(
-            ProvisionMaster,
-            and_(
-                ProvisionMaster.law_id == LawMaster.law_id,
-                or_(
-                    ProvisionMaster.sub_sector_id == client.sub_sector_id,
-                    ProvisionMaster.sub_sector_id.is_(None),
-                ),
-            ),
-        )
-        .outerjoin(
-            ComplianceRequirementMaster,
-            ComplianceRequirementMaster.provision_id == ProvisionMaster.provision_id,
-        )
-        .outerjoin(
-            AuditProcedureMaster,
-            AuditProcedureMaster.compliance_id == ComplianceRequirementMaster.compliance_id,
-        )
-        .where(
-            SectorMaster.sector_id == client.sector_id,
-        )
-        .order_by(
-            LawMaster.law_id,
-            ProvisionMaster.provision_id,
-            ComplianceRequirementMaster.compliance_id,
-            AuditProcedureMaster.audit_id,
-        )
-    ).all()
+    scope = get_scope(db, client.dataset_key, client.sector_id, client.sub_sector_id)
+    if not scope:
+        raise ValueError("This client does not have a valid regulatory dataset scope")
+    rows = compose_control_rows(db, scope)
 
     if not rows:
         raise ValueError(
-            f"No regulatory master data found for sector/sub-sector {client.sector_id}/{client.sub_sector_id}"
+            "No regulatory master data was found for this client scope"
         )
 
     engagement = AuditEngagement(
@@ -325,59 +123,33 @@ def create_audit(db: Session, firm_id: str, payload: AuditEngagementCreate) -> A
         period_start=payload.period_start,
         period_end=payload.period_end,
         status="In Progress",
+        dataset_key=client.dataset_key,
         sector_id=client.sector_id,
         sub_sector_id=client.sub_sector_id,
         client_name=client.client_name,
-        sector_name=client.sector.sector_name if client.sector else None,
-        sub_sector_name=client.sub_sector.sub_sector_name if client.sub_sector else None,
+        sector_name=scope.sector_name,
+        sub_sector_name=scope.sub_sector_name,
         remarks=payload.remarks,
     )
     db.add(engagement)
     db.commit()
     db.refresh(engagement)
 
-    audit_procedure_ids = {
-        audit_procedure.audit_id
-        for _, _, _, audit_procedure in rows
-        if audit_procedure is not None
-    }
-    evidence_map = _build_evidence_map(db, audit_procedure_ids)
-    evidence_metadata_map = _build_evidence_metadata_map(db, audit_procedure_ids)
-    observation_map = _build_observation_map(db, audit_procedure_ids)
-    observation_risk_map = _build_observation_risk_map(db, audit_procedure_ids)
-
     items: list[AuditEngagementItem] = []
-    for index, (law, provision, compliance, audit_procedure) in enumerate(rows, start=1):
-        audit_procedure_id = audit_procedure.audit_id if audit_procedure else None
+    for index, row in enumerate(rows, start=1):
         items.append(
             AuditEngagementItem(
                 item_id=_new_id("AIT"),
                 audit_id=engagement.audit_id,
-                law_id=law.law_id,
-                law_name=law.law_name,
-                regulator=law.regulator,
-                authority_level=law.authority_level,
-                document_type=law.document_type,
-                applicability_type=law.applicability_type,
-                applicability_trigger=law.applicability_trigger,
-                provision_id=provision.provision_id,
-                provision_name=provision.provision_name,
-                statutory_reference=provision.statutory_reference,
-                compliance_id=compliance.compliance_id if compliance else None,
-                compliance_requirement=compliance.compliance_requirement if compliance else None,
-                compliance_objective=compliance.compliance_objective if compliance else None,
-                compliance_frequency=compliance.frequency if compliance else None,
-                audit_procedure_id=audit_procedure_id,
-                audit_procedure=audit_procedure.audit_procedure if audit_procedure else None,
-                audit_method=audit_procedure.audit_method if audit_procedure else None,
-                audit_frequency=audit_procedure.audit_frequency if audit_procedure else None,
-                evidence_template="\n".join(evidence_map.get(audit_procedure_id, [])) or None,
-                evidence_type=(evidence_metadata_map.get(audit_procedure_id, {}) or {}).get("evidence_type"),
-                evidence_mandatory=(evidence_metadata_map.get(audit_procedure_id, {}) or {}).get("evidence_mandatory"),
-                observation_template="\n".join(observation_map.get(audit_procedure_id, [])) or None,
-                priority=compliance.priority if compliance else None,
-                risk_level=observation_risk_map.get(audit_procedure_id),
-                origin=compliance.origin if compliance else provision.origin,
+                law_id=row["law_id"], parent_law_id=row["parent_law_id"], parent_law_name=row["parent_law_name"], law_name=row["law_name"],
+                regulator=row["regulator"], authority_level=row["authority_level"], document_type=row["document_type"],
+                applicability_type=row["applicability_type"], applicability_trigger=row["applicability_trigger"],
+                provision_id=row["provision_id"], provision_name=row["provision_name"], statutory_reference=row["statutory_reference"],
+                compliance_id=row["compliance_id"], compliance_requirement=row["compliance_requirement"], compliance_objective=row["compliance_objective"], compliance_frequency=row["compliance_frequency"],
+                audit_procedure_id=row["audit_procedure_id"], audit_procedure=row["audit_procedure"], audit_method=row["audit_method"], audit_frequency=row["audit_frequency"],
+                evidence_template=row["evidence_template"], evidence_type=row["evidence_type"], evidence_mandatory=row["evidence_mandatory"], observation_template=row["observation_template"],
+                priority=row["priority"], risk_level=row["risk_level"], origin=row["origin"],
+                source_scope=row["source_scope"], applicability_scope=row["applicability_scope"], dataset_key=row["dataset_key"],
                 status="Pending",
                 display_order=index,
             )
@@ -463,56 +235,18 @@ def list_audit_items(db: Session, audit_id: str) -> list[AuditEngagementItem]:
 
 
 def list_audit_law_summaries(db: Session, audit_id: str) -> list[dict[str, int | str | None]]:
-    parent_law = aliased(LawMaster)
-    origin_scope = case(
-        (
-            func.bool_and(
-                case((AuditEngagementItem.origin == "CORE", True), else_=False)
-            ),
-            "CORE",
-        ),
-        (
-            func.bool_or(
-                case(
-                    (
-                        and_(
-                            AuditEngagementItem.origin.is_not(None),
-                            AuditEngagementItem.origin != "CORE",
-                        ),
-                        True,
-                    ),
-                    else_=False,
-                )
-            )
-            & func.bool_or(
-                case((AuditEngagementItem.origin == "CORE", True), else_=False)
-            ),
-            "Mixed",
-        ),
-        (
-            func.bool_or(
-                case(
-                    (
-                        and_(
-                            AuditEngagementItem.origin.is_not(None),
-                            AuditEngagementItem.origin != "CORE",
-                        ),
-                        True,
-                    ),
-                    else_=False,
-                )
-            ),
-            "Sub-sector",
-        ),
-        else_=None,
-    )
+    applicability_scope = case(
+        (func.count(func.distinct(AuditEngagementItem.applicability_scope)) > 1, "Mixed"),
+        else_=func.max(AuditEngagementItem.applicability_scope),
+    ).label("applicability_scope")
     rows = db.execute(
         select(
             AuditEngagementItem.law_id,
-            func.max(LawMaster.parent_law).label("parent_law_id"),
-            func.max(parent_law.law_name).label("parent_law_name"),
+            func.max(AuditEngagementItem.parent_law_id).label("parent_law_id"),
+            func.max(AuditEngagementItem.parent_law_name).label("parent_law_name"),
             func.coalesce(AuditEngagementItem.law_name, "Law").label("law_name"),
-            origin_scope.label("origin_scope"),
+            func.max(AuditEngagementItem.source_scope).label("origin_scope"),
+            applicability_scope,
             func.max(AuditEngagementItem.regulator).label("regulator"),
             func.max(AuditEngagementItem.authority_level).label("authority_level"),
             func.max(AuditEngagementItem.document_type).label("document_type"),
@@ -525,8 +259,6 @@ def list_audit_law_summaries(db: Session, audit_id: str) -> list[dict[str, int |
                 )
             ).label("completed_items"),
         )
-        .outerjoin(LawMaster, LawMaster.law_id == AuditEngagementItem.law_id)
-        .outerjoin(parent_law, parent_law.law_id == LawMaster.parent_law)
         .where(AuditEngagementItem.audit_id == audit_id)
         .group_by(AuditEngagementItem.law_id, AuditEngagementItem.law_name)
         .order_by(
@@ -542,53 +274,15 @@ def list_audit_provision_summaries(
     audit_id: str,
     law_id: str | None,
 ) -> list[dict[str, int | str | None]]:
-    origin_scope = case(
-        (
-            func.bool_and(
-                case((AuditEngagementItem.origin == "CORE", True), else_=False)
-            ),
-            "CORE",
-        ),
-        (
-            func.bool_or(
-                case(
-                    (
-                        and_(
-                            AuditEngagementItem.origin.is_not(None),
-                            AuditEngagementItem.origin != "CORE",
-                        ),
-                        True,
-                    ),
-                    else_=False,
-                )
-            )
-            & func.bool_or(
-                case((AuditEngagementItem.origin == "CORE", True), else_=False)
-            ),
-            "Mixed",
-        ),
-        (
-            func.bool_or(
-                case(
-                    (
-                        and_(
-                            AuditEngagementItem.origin.is_not(None),
-                            AuditEngagementItem.origin != "CORE",
-                        ),
-                        True,
-                    ),
-                    else_=False,
-                )
-            ),
-            "Sub-sector",
-        ),
-        else_=None,
-    )
     stmt = select(
         AuditEngagementItem.provision_id,
         func.coalesce(AuditEngagementItem.provision_name, "Provision").label("provision_name"),
         func.max(AuditEngagementItem.statutory_reference).label("statutory_reference"),
-        origin_scope.label("origin_scope"),
+        func.max(AuditEngagementItem.source_scope).label("origin_scope"),
+        case(
+            (func.count(func.distinct(AuditEngagementItem.applicability_scope)) > 1, "Mixed"),
+            else_=func.max(AuditEngagementItem.applicability_scope),
+        ).label("applicability_scope"),
         func.count(AuditEngagementItem.item_id).label("total_items"),
         func.sum(
             case(
