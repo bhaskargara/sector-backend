@@ -861,8 +861,8 @@ class PharmacyDatasetImporter:
         remarks: str | None,
         sub_sector_lookup: dict[str, str],
     ) -> str | None:
-        if raw_sub_sector in {None, "All"}:
-            if raw_sub_sector == "All":
+        if raw_sub_sector is None or self._is_sector_wide_sub_sector_marker(raw_sub_sector):
+            if raw_sub_sector is not None:
                 return "All"
             sub_sector_id = self._extract_sub_sector_id(remarks)
             # An empty sub-sector on a law means it applies at sector level.
@@ -1075,7 +1075,7 @@ class PharmacyDatasetImporter:
     ) -> None:
         for record in datasets.get("Provision Master", []):
             sub_sector_id = record.get("sub_sector_id")
-            if isinstance(sub_sector_id, str) and sub_sector_id.strip().casefold() == "all":
+            if self._is_sector_wide_sub_sector_marker(sub_sector_id):
                 # Workbooks use "All" to mean sector-wide. The database uses
                 # NULL so it is not mistaken for a sub-sector foreign key.
                 record["sub_sector_id"] = None
@@ -1113,6 +1113,16 @@ class PharmacyDatasetImporter:
             if sub_sector_id is None:
                 continue
             record["sub_sector_id"] = alias_map.get(sub_sector_id, sub_sector_id)
+
+    @staticmethod
+    def _is_sector_wide_sub_sector_marker(value: object) -> bool:
+        """Return whether a workbook value applies to the full sector.
+
+        Some workbooks use `All`; others use explanatory variants such as
+        `ALL - permitted entities`. Those values are scope markers, not
+        sub-sector foreign keys.
+        """
+        return isinstance(value, str) and value.strip().casefold().startswith("all")
 
     def _materialize_missing_sub_sectors(
         self,

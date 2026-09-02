@@ -20,7 +20,14 @@ from app.core.database import Base
 # Each data source lives in its own PostgreSQL schema.  IDs in the workbooks
 # are intentionally local to that schema (for example, LAW001 can exist in IT
 # and Bank without a collision).
-REGULATORY_DATASET_SCHEMAS = ("common_core", "pharmacy", "bank", "it", "manufacturing")
+REGULATORY_DATASET_SCHEMAS = (
+    "common_core",
+    "pharmacy",
+    "bank",
+    "it",
+    "manufacturing",
+    "nbfc",
+)
 
 
 def _timestamp_columns() -> list[Column]:

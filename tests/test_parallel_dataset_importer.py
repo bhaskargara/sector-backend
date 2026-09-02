@@ -8,7 +8,7 @@ from app.repositories.regulatory_runtime import _unique_nonempty_values
 
 
 def test_parallel_dataset_config_binds_each_sector_dataset_tables():
-    for dataset_key in ("bank", "it", "manufacturing"):
+    for dataset_key in ("bank", "it", "manufacturing", "nbfc"):
         config = build_dataset_sheet_config(dataset_key)
 
         assert set(PARALLEL_IMPORT_ORDER) == set(config)
@@ -47,6 +47,33 @@ def test_all_provision_sub_sector_marker_becomes_sector_wide():
     importer._normalize_sub_sector_references(datasets)
 
     assert datasets["Provision Master"][0]["sub_sector_id"] is None
+
+
+def test_explanatory_all_sub_sector_marker_becomes_sector_wide():
+    importer = PharmacyDatasetImporter(db=None)
+    datasets = {
+        "Sub-Sector Master": [],
+        "Provision Master": [
+            {"provision_id": "PROV001", "sub_sector_id": "ALL - permitted entities"}
+        ],
+    }
+
+    importer._normalize_sub_sector_references(datasets)
+
+    assert datasets["Provision Master"][0]["sub_sector_id"] is None
+
+
+def test_explanatory_all_law_sub_sector_remains_sector_wide():
+    importer = PharmacyDatasetImporter(db=None)
+
+    assert (
+        importer._derive_law_sub_sector(
+            raw_sub_sector="ALL - permitted entities",
+            remarks=None,
+            sub_sector_lookup={"NBFC-SUB001": "Investment and Credit Company"},
+        )
+        == "All"
+    )
 
 
 def test_blank_law_sub_sector_means_sector_wide_scope():
