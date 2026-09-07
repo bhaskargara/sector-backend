@@ -365,6 +365,9 @@ def update_audit_item(
     db.commit()
     db.refresh(item)
     _recalculate_progress(db, engagement)
+    # Progress recalculation commits the session and expires the item again.
+    # Refresh it so the API can serialize the saved audit update.
+    db.refresh(item)
     return item
 
 
