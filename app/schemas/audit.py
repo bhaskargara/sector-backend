@@ -94,9 +94,12 @@ class AuditEngagementRead(ORMBase):
     period_start: date | None = None
     period_end: date | None = None
     status: str
+    is_locked: bool = False
+    locked_at: datetime | None = None
     dataset_key: str
     sector_id: str
     sub_sector_id: str
+    sub_sector_ids: list[str] = Field(default_factory=list)
     client_name: str
     sector_name: str | None = None
     sub_sector_name: str | None = None
@@ -109,6 +112,14 @@ class AuditEngagementRead(ORMBase):
 
 class AuditEngagementDetail(AuditEngagementRead):
     items: list[AuditEngagementItemRead]
+
+
+class PlatformAuditRead(AuditEngagementRead):
+    firm_name: str
+
+
+class AuditLockUpdate(BaseModel):
+    is_locked: bool
 
 
 class AuditLawSummary(BaseModel):

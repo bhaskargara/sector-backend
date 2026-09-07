@@ -1,6 +1,6 @@
-from datetime import date
+from datetime import date, datetime
 
-from sqlalchemy import ForeignKey, Integer, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -31,9 +31,12 @@ class AuditEngagement(TimestampMixin, Base):
     period_start: Mapped[date | None]
     period_end: Mapped[date | None]
     status: Mapped[str] = mapped_column(default="Draft", nullable=False, index=True)
+    is_locked: Mapped[bool] = mapped_column(default=False, nullable=False, index=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     dataset_key: Mapped[str] = mapped_column(nullable=False, index=True)
     sector_id: Mapped[str] = mapped_column(nullable=False, index=True)
     sub_sector_id: Mapped[str] = mapped_column(nullable=False, index=True)
+    sub_sector_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     client_name: Mapped[str] = mapped_column(nullable=False, index=True)
     sector_name: Mapped[str | None]
     sub_sector_name: Mapped[str | None]

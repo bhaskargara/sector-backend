@@ -15,7 +15,8 @@ from app.models.organization import (
     FirmUser,
     PlatformAdminUser,
 )
-from app.repositories.regulatory_runtime import get_scope
+from app.repositories.audit_cleanup import delete_audit_snapshot
+from app.repositories.regulatory_runtime import get_scopes
 from app.schemas.organization import (
     ClientCreate,
     ClientUpdate,
@@ -581,14 +582,28 @@ def get_client(db: Session, firm_id: str, client_id: str) -> ClientMaster | None
     return db.scalar(stmt)
 
 
+def _normalize_sub_sector_ids(
+    sub_sector_ids: list[str] | None,
+    fallback_sub_sector_id: str | None,
+) -> list[str]:
+    result: list[str] = []
+    for sub_sector_id in sub_sector_ids or [fallback_sub_sector_id]:
+        if sub_sector_id and sub_sector_id not in result:
+            result.append(sub_sector_id)
+    return result
+
+
 def _validate_client_scope(
     db: Session,
     dataset_key: str,
     sector_id: str,
-    sub_sector_id: str,
-) -> None:
-    if not get_scope(db, dataset_key, sector_id, sub_sector_id):
-        raise ValueError("The selected sector and sub-sector are not available in this regulatory dataset")
+    sub_sector_ids: list[str],
+) -> list[str]:
+    selected_ids = _normalize_sub_sector_ids(sub_sector_ids, None)
+    scopes = get_scopes(db, dataset_key, sector_id, selected_ids)
+    if not selected_ids or len(scopes) != len(selected_ids):
+        raise ValueError("Each selected sub-sector must belong to the selected sector and regulatory dataset")
+    return selected_ids
 
 
 def create_client(db: Session, firm_id: str, payload: ClientCreate) -> ClientMaster:
@@ -596,11 +611,19 @@ def create_client(db: Session, firm_id: str, payload: ClientCreate) -> ClientMas
     if not firm:
         raise ValueError(f"Unknown firm_id: {firm_id}")
 
-    _validate_client_scope(db, payload.dataset_key, payload.sector_id, payload.sub_sector_id)
+    sub_sector_ids = _validate_client_scope(
+        db,
+        payload.dataset_key,
+        payload.sector_id,
+        _normalize_sub_sector_ids(payload.sub_sector_ids, payload.sub_sector_id),
+    )
+    client_values = payload.model_dump()
+    client_values["sub_sector_id"] = sub_sector_ids[0]
+    client_values["sub_sector_ids"] = sub_sector_ids
     client = ClientMaster(
         client_id=_new_id("CLT"),
         firm_id=firm_id,
-        **payload.model_dump(),
+        **client_values,
     )
     db.add(client)
     db.flush()
@@ -648,20 +671,24 @@ def update_client(
     values = payload.model_dump(exclude_unset=True)
     next_dataset_key = values.get("dataset_key", client.dataset_key)
     next_sector_id = values.get("sector_id", client.sector_id)
-    next_sub_sector_id = values.get("sub_sector_id", client.sub_sector_id)
-    if "dataset_key" in values or "sector_id" in values or "sub_sector_id" in values:
-        audit_exists = db.scalar(
-            select(AuditEngagement.audit_id).where(AuditEngagement.client_id == client.client_id).limit(1)
+    next_sub_sector_ids = _normalize_sub_sector_ids(
+        values.get("sub_sector_ids", client.sub_sector_ids),
+        values.get("sub_sector_id", client.sub_sector_id),
+    )
+    if (
+        "dataset_key" in values
+        or "sector_id" in values
+        or "sub_sector_id" in values
+        or "sub_sector_ids" in values
+    ):
+        next_sub_sector_ids = _validate_client_scope(
+            db,
+            next_dataset_key,
+            next_sector_id,
+            next_sub_sector_ids,
         )
-        scope_changed = (
-            next_dataset_key != client.dataset_key or next_sector_id != client.sector_id or next_sub_sector_id != client.sub_sector_id
-        )
-        if audit_exists and scope_changed:
-            raise ValueError(
-                "Sector and sub-sector cannot be changed after an audit has been created for this client"
-            )
-    if "dataset_key" in values or "sector_id" in values or "sub_sector_id" in values:
-        _validate_client_scope(db, next_dataset_key, next_sector_id, next_sub_sector_id)
+        values["sub_sector_ids"] = next_sub_sector_ids
+        values["sub_sector_id"] = next_sub_sector_ids[0]
 
     previous_client_name = client.client_name
     for field, value in values.items():
@@ -707,13 +734,26 @@ def delete_client(db: Session, firm_id: str, client_id: str) -> bool:
     client = get_client(db, firm_id, client_id)
     if not client:
         return False
+
+    audits = db.scalars(
+        select(AuditEngagement).where(
+            AuditEngagement.firm_id == firm_id,
+            AuditEngagement.client_id == client_id,
+        )
+    ).all()
+    for audit in audits:
+        delete_audit_snapshot(db, audit)
+
+    db.flush()
     db.delete(client)
     db.commit()
     return True
 
 
-def serialize_client(db: Session, client: ClientMaster) -> dict[str, str | None]:
-    scope = get_scope(db, client.dataset_key, client.sector_id, client.sub_sector_id)
+def serialize_client(db: Session, client: ClientMaster) -> dict[str, object]:
+    sub_sector_ids = _normalize_sub_sector_ids(client.sub_sector_ids, client.sub_sector_id)
+    scopes = get_scopes(db, client.dataset_key, client.sector_id, sub_sector_ids)
+    first_scope = scopes[0] if scopes else None
     return {
         "client_id": client.client_id,
         "firm_id": client.firm_id,
@@ -724,11 +764,13 @@ def serialize_client(db: Session, client: ClientMaster) -> dict[str, str | None]
         "city": client.city,
         "dataset_key": client.dataset_key,
         "sector_id": client.sector_id,
-        "sub_sector_id": client.sub_sector_id,
+        "sub_sector_id": sub_sector_ids[0] if sub_sector_ids else client.sub_sector_id,
+        "sub_sector_ids": sub_sector_ids,
+        "is_listed_company": client.is_listed_company,
         "status": client.status,
         "remarks": client.remarks,
-        "sector_name": scope.sector_name if scope else None,
-        "sub_sector_name": scope.sub_sector_name if scope else None,
+        "sector_name": first_scope.sector_name if first_scope else None,
+        "sub_sector_name": ", ".join(scope.sub_sector_name for scope in scopes) or None,
         "enterprise_id": client.enterprise_id,
     }
 

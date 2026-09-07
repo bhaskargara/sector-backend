@@ -1,5 +1,5 @@
 from collections import defaultdict
-from pathlib import Path
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy import case, func, select
@@ -7,11 +7,15 @@ from sqlalchemy.orm import Session
 
 from app.models.audit import AuditEngagement, AuditEngagementItem, AuditEvidenceAttachment
 from app.models.organization import ClientMaster, FirmEnterpriseEngagement, FirmMaster
-from app.repositories.regulatory_runtime import compose_control_rows, get_scope
+from app.repositories.audit_cleanup import UPLOAD_ROOT, delete_audit_snapshot
+from app.repositories.regulatory_runtime import compose_control_rows, get_scopes
 from app.schemas.audit import AuditEngagementCreate, AuditEngagementUpdate, AuditItemUpdate
 
-UPLOAD_ROOT = Path(__file__).resolve().parents[2] / "uploads" / "audit_evidence"
 COMPLETED_STATUSES = {"Complied", "Not Applicable"}
+
+
+class AuditLockedError(ValueError):
+    """Raised when a firm attempts to change an audit finalized by Platform Admin."""
 
 
 def _new_id(prefix: str) -> str:
@@ -46,12 +50,47 @@ def list_audits(db: Session, firm_id: str) -> list[AuditEngagement]:
     return db.scalars(stmt).all()
 
 
+def list_platform_audits(db: Session) -> list[dict[str, object]]:
+    rows = db.execute(
+        select(AuditEngagement, FirmMaster.firm_name)
+        .join(FirmMaster, FirmMaster.firm_id == AuditEngagement.firm_id)
+        .order_by(AuditEngagement.created_at.desc())
+    ).all()
+    return [
+        {**audit.__dict__, "firm_name": firm_name}
+        for audit, firm_name in rows
+    ]
+
+
 def get_audit(db: Session, firm_id: str, audit_id: str) -> AuditEngagement | None:
     stmt = select(AuditEngagement).where(
         AuditEngagement.firm_id == firm_id,
         AuditEngagement.audit_id == audit_id,
     )
     return db.scalar(stmt)
+
+
+def set_audit_lock(
+    db: Session,
+    audit_id: str,
+    *,
+    is_locked: bool,
+) -> AuditEngagement | None:
+    engagement = db.get(AuditEngagement, audit_id)
+    if not engagement:
+        return None
+    engagement.is_locked = is_locked
+    engagement.locked_at = datetime.now(UTC) if is_locked else None
+    db.commit()
+    db.refresh(engagement)
+    return engagement
+
+
+def _ensure_unlocked(engagement: AuditEngagement) -> None:
+    if engagement.is_locked:
+        raise AuditLockedError(
+            "This audit is locked by Platform Admin and is available for review only"
+        )
 
 
 def get_audit_item(db: Session, audit_id: str, item_id: str) -> AuditEngagementItem | None:
@@ -103,10 +142,15 @@ def create_audit(db: Session, firm_id: str, payload: AuditEngagementCreate) -> A
             f"Audit already exists for {client.client_name} in {payload.audit_period_label}"
         )
 
-    scope = get_scope(db, client.dataset_key, client.sector_id, client.sub_sector_id)
-    if not scope:
+    sub_sector_ids = list(dict.fromkeys(client.sub_sector_ids or [client.sub_sector_id]))
+    scopes = get_scopes(db, client.dataset_key, client.sector_id, sub_sector_ids)
+    if not scopes or len(scopes) != len(sub_sector_ids):
         raise ValueError("This client does not have a valid regulatory dataset scope")
-    rows = compose_control_rows(db, scope)
+    rows = compose_control_rows(
+        db,
+        scopes,
+        include_sebi_listed_overlay=client.is_listed_company,
+    )
 
     if not rows:
         raise ValueError(
@@ -125,10 +169,11 @@ def create_audit(db: Session, firm_id: str, payload: AuditEngagementCreate) -> A
         status="In Progress",
         dataset_key=client.dataset_key,
         sector_id=client.sector_id,
-        sub_sector_id=client.sub_sector_id,
+        sub_sector_id=sub_sector_ids[0],
+        sub_sector_ids=sub_sector_ids,
         client_name=client.client_name,
-        sector_name=scope.sector_name,
-        sub_sector_name=scope.sub_sector_name,
+        sector_name=scopes[0].sector_name,
+        sub_sector_name=", ".join(scope.sub_sector_name for scope in scopes),
         remarks=payload.remarks,
     )
     db.add(engagement)
@@ -170,6 +215,7 @@ def update_audit(
     engagement = get_audit(db, firm_id, audit_id)
     if not engagement:
         return None
+    _ensure_unlocked(engagement)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(engagement, field, value)
     db.commit()
@@ -181,46 +227,9 @@ def delete_audit(db: Session, firm_id: str, audit_id: str) -> bool:
     engagement = get_audit(db, firm_id, audit_id)
     if not engagement:
         return False
+    _ensure_unlocked(engagement)
 
-    items = db.scalars(
-        select(AuditEngagementItem).where(AuditEngagementItem.audit_id == audit_id)
-    ).all()
-    item_ids = [item.item_id for item in items]
-
-    attachments = []
-    if item_ids:
-        attachments = db.scalars(
-            select(AuditEvidenceAttachment).where(AuditEvidenceAttachment.item_id.in_(item_ids))
-        ).all()
-
-    for attachment in attachments:
-        absolute_path = UPLOAD_ROOT.parent.parent / attachment.relative_path
-        try:
-            if absolute_path.exists():
-                absolute_path.unlink()
-        except OSError:
-            pass
-        db.delete(attachment)
-
-    for item in items:
-        db.delete(item)
-
-    audit_upload_dir = UPLOAD_ROOT / audit_id
-    if audit_upload_dir.exists():
-        for path in sorted(audit_upload_dir.rglob("*"), reverse=True):
-            try:
-                if path.is_file():
-                    path.unlink()
-                elif path.is_dir():
-                    path.rmdir()
-            except OSError:
-                pass
-        try:
-            audit_upload_dir.rmdir()
-        except OSError:
-            pass
-
-    db.delete(engagement)
+    delete_audit_snapshot(db, engagement)
     db.commit()
     return True
 
@@ -347,6 +356,7 @@ def update_audit_item(
     engagement = get_audit(db, firm_id, audit_id)
     if not engagement:
         return None
+    _ensure_unlocked(engagement)
     item = get_audit_item(db, audit_id, item_id)
     if not item:
         return None
@@ -370,6 +380,7 @@ def add_attachment(
     engagement = get_audit(db, firm_id, audit_id)
     if not engagement:
         return None
+    _ensure_unlocked(engagement)
     item = get_audit_item(db, audit_id, item_id)
     if not item:
         return None

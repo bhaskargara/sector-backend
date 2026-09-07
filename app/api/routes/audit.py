@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.repositories.audit_repository import (
+    AuditLockedError,
     UPLOAD_ROOT,
     add_attachment,
     create_audit,
@@ -19,6 +20,8 @@ from app.repositories.audit_repository import (
     list_audit_law_summaries,
     list_audit_provision_summaries,
     list_audits,
+    list_platform_audits,
+    set_audit_lock,
     update_audit,
     update_audit_item,
 )
@@ -29,9 +32,11 @@ from app.schemas.audit import (
     AuditLawSummary,
     AuditEngagementRead,
     AuditEngagementUpdate,
+    AuditLockUpdate,
     AuditEvidenceAttachmentRead,
     AuditItemUpdate,
     AuditProvisionSummary,
+    PlatformAuditRead,
 )
 
 router = APIRouter(tags=["audit"])
@@ -44,6 +49,23 @@ def not_found(message: str) -> HTTPException:
 @router.get("/firms/{firm_id}/audits", response_model=list[AuditEngagementRead])
 def get_firm_audits(firm_id: str, db: Session = Depends(get_db)):
     return list_audits(db, firm_id)
+
+
+@router.get("/platform/audits", response_model=list[PlatformAuditRead])
+def get_platform_audits(db: Session = Depends(get_db)):
+    return [PlatformAuditRead(**audit) for audit in list_platform_audits(db)]
+
+
+@router.patch("/platform/audits/{audit_id}/lock", response_model=AuditEngagementRead)
+def patch_platform_audit_lock(
+    audit_id: str,
+    payload: AuditLockUpdate,
+    db: Session = Depends(get_db),
+):
+    engagement = set_audit_lock(db, audit_id, is_locked=payload.is_locked)
+    if not engagement:
+        raise not_found(f"Audit not found: {audit_id}")
+    return engagement
 
 
 @router.post(
@@ -141,7 +163,10 @@ def patch_firm_audit(
     payload: AuditEngagementUpdate,
     db: Session = Depends(get_db),
 ):
-    engagement = update_audit(db, firm_id, audit_id, payload)
+    try:
+        engagement = update_audit(db, firm_id, audit_id, payload)
+    except AuditLockedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if not engagement:
         raise not_found(f"Audit not found: {audit_id}")
     return engagement
@@ -149,7 +174,11 @@ def patch_firm_audit(
 
 @router.delete("/firms/{firm_id}/audits/{audit_id}", status_code=status.HTTP_204_NO_CONTENT)
 def remove_firm_audit(firm_id: str, audit_id: str, db: Session = Depends(get_db)):
-    if not delete_audit(db, firm_id, audit_id):
+    try:
+        deleted = delete_audit(db, firm_id, audit_id)
+    except AuditLockedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if not deleted:
         raise not_found(f"Audit not found: {audit_id}")
     return None
 
@@ -165,7 +194,10 @@ def patch_firm_audit_item(
     payload: AuditItemUpdate,
     db: Session = Depends(get_db),
 ):
-    item = update_audit_item(db, firm_id, audit_id, item_id, payload)
+    try:
+        item = update_audit_item(db, firm_id, audit_id, item_id, payload)
+    except AuditLockedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if not item:
         raise not_found(f"Audit item not found: {item_id}")
     return AuditEngagementItemRead(
@@ -192,7 +224,10 @@ async def post_firm_audit_attachment(
     file_name = request.headers.get("X-Filename", "attachment.bin")
     content_type = request.headers.get("Content-Type")
     content = await request.body()
-    attachment = add_attachment(db, firm_id, audit_id, item_id, file_name, content_type, content)
+    try:
+        attachment = add_attachment(db, firm_id, audit_id, item_id, file_name, content_type, content)
+    except AuditLockedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if not attachment:
         raise not_found(f"Audit item not found: {item_id}")
     return attachment

@@ -27,6 +27,7 @@ REGULATORY_DATASET_SCHEMAS = (
     "it",
     "manufacturing",
     "nbfc",
+    "sebi_listed",
 )
 
 

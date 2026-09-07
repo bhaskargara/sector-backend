@@ -1,6 +1,6 @@
 from datetime import date
 
-from sqlalchemy import ForeignKey, Text
+from sqlalchemy import ForeignKey, JSON, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -129,6 +129,8 @@ class ClientMaster(TimestampMixin, Base):
     )
     sector_id: Mapped[str] = mapped_column(nullable=False, index=True)
     sub_sector_id: Mapped[str] = mapped_column(nullable=False, index=True)
+    sub_sector_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    is_listed_company: Mapped[bool] = mapped_column(nullable=False, default=False, index=True)
     status: Mapped[str] = mapped_column(default="Draft", nullable=False, index=True)
     remarks: Mapped[str | None] = mapped_column(Text)
 

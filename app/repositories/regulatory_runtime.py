@@ -33,7 +33,7 @@ def get_dataset(db: Session, dataset_key: str) -> RegulatoryDataset | None:
 def list_datasets(db: Session) -> list[RegulatoryDataset]:
     return db.scalars(
         select(RegulatoryDataset)
-        .where(RegulatoryDataset.dataset_key != "common_core", RegulatoryDataset.is_active == "Yes")
+        .where(RegulatoryDataset.dataset_type == "Sector", RegulatoryDataset.is_active == "Yes")
         .order_by(RegulatoryDataset.display_name)
     ).all()
 
@@ -42,7 +42,7 @@ def get_scope(
     db: Session, dataset_key: str, sector_id: str, sub_sector_id: str
 ) -> RegulatoryScope | None:
     dataset = get_dataset(db, dataset_key)
-    if not dataset or dataset.dataset_key == "common_core" or dataset.is_active != "Yes":
+    if not dataset or dataset.dataset_type != "Sector" or dataset.is_active != "Yes":
         return None
     tables = _tables(dataset.schema_name)
     sector = db.execute(
@@ -63,6 +63,25 @@ def get_scope(
         sub_sector_id=sub_sector_id,
         sub_sector_name=sub_sector["sub_sector_name"],
     )
+
+
+def get_scopes(
+    db: Session,
+    dataset_key: str,
+    sector_id: str,
+    sub_sector_ids: Iterable[str],
+) -> list[RegulatoryScope]:
+    """Return the selected, valid sub-sector scopes in the user's chosen order."""
+    scopes: list[RegulatoryScope] = []
+    seen: set[str] = set()
+    for sub_sector_id in sub_sector_ids:
+        if not sub_sector_id or sub_sector_id in seen:
+            continue
+        seen.add(sub_sector_id)
+        scope = get_scope(db, dataset_key, sector_id, sub_sector_id)
+        if scope:
+            scopes.append(scope)
+    return scopes
 
 
 def list_sectors(db: Session, dataset_key: str | None = None) -> list[dict[str, str | None]]:
@@ -102,15 +121,131 @@ def _canonical_core_law_names(db: Session) -> set[str]:
     return set(db.scalars(select(table.c.law_name)).all())
 
 
-def compose_control_rows(db: Session, scope: RegulatoryScope) -> list[dict[str, object]]:
-    """Return audit-ready rows from Common Core plus exactly one sector dataset.
+def _law_scope_includes_sub_sector(
+    law_sub_sector: str | None,
+    sub_sector_name: str,
+    sub_sector_id: str | None = None,
+) -> bool:
+    """Match a selected sub-sector against one or more law scope names.
+
+    Law Master permits a single law to apply to several sub-sectors. Sector
+    datasets may use readable names separated by ` / ` or ` & `, while some
+    use semicolon-separated sub-sector IDs. A full-name boundary match is
+    used because `&` can legitimately occur inside a sub-sector name.
+    """
+    if not law_sub_sector or law_sub_sector.strip().casefold() == "all":
+        return False
+    law_scope = law_sub_sector.strip()
+    candidates = [sub_sector_name]
+    if sub_sector_id:
+        candidates.append(sub_sector_id)
+    return any(_law_scope_includes_value(law_scope, candidate) for candidate in candidates)
+
+
+def _law_scope_is_sector_wide(law_sub_sector: str | None) -> bool:
+    """Return whether Law Master declares the law applicable across a sector."""
+    normalized_scope = (law_sub_sector or "").strip().casefold()
+    return not normalized_scope or normalized_scope == "all" or normalized_scope.endswith(" core")
+
+
+def _law_scope_includes_value(law_scope: str, selected_scope: str) -> bool:
+    normalized_law_scope = law_scope.casefold()
+    normalized_selected_scope = selected_scope.strip().casefold()
+    if normalized_law_scope == normalized_selected_scope:
+        return True
+    # Some older sector workbooks use a short local ID such as SUB003 while
+    # the Sub-Sector Master uses a namespaced ID such as BANKSUB003.
+    if normalized_law_scope.startswith("sub") and normalized_selected_scope.endswith(normalized_law_scope):
+        return True
+    if ";" in normalized_law_scope:
+        return normalized_selected_scope in {
+            value.strip() for value in normalized_law_scope.split(";") if value.strip()
+        }
+
+    separators = (" / ", " & ")
+    if any(
+        normalized_law_scope.startswith(f"{normalized_selected_scope}{separator}")
+        or normalized_law_scope.endswith(f"{separator}{normalized_selected_scope}")
+        for separator in separators
+    ):
+        return True
+    return any(
+        f"{before}{normalized_selected_scope}{after}" in normalized_law_scope
+        for before in separators
+        for after in separators
+    )
+
+
+def _law_scope_filter(
+    law_sub_sector,
+    sub_sector_name: str,
+    sub_sector_id: str,
+):
+    """Return the PostgreSQL predicate mirroring `_law_scope_includes_sub_sector`."""
+    separators = (" / ", " & ")
+    match_conditions = []
+    selected_scopes = {sub_sector_name, sub_sector_id}
+    short_id_index = sub_sector_id.upper().find("SUB")
+    if short_id_index >= 0:
+        selected_scopes.add(sub_sector_id[short_id_index:])
+
+    for selected_scope in selected_scopes:
+        match_conditions.append(law_sub_sector == selected_scope)
+        for separator in separators:
+            match_conditions.extend(
+                [
+                    law_sub_sector.like(f"{selected_scope}{separator}%"),
+                    law_sub_sector.like(f"%{separator}{selected_scope}"),
+                ]
+            )
+        for before in separators:
+            for after in separators:
+                match_conditions.append(
+                    law_sub_sector.like(f"%{before}{selected_scope}{after}%")
+                )
+        match_conditions.extend(
+            [
+                law_sub_sector.like(f"{selected_scope};%"),
+                law_sub_sector.like(f"%;{selected_scope}"),
+                law_sub_sector.like(f"%; {selected_scope}"),
+                law_sub_sector.like(f"%;{selected_scope};%"),
+                law_sub_sector.like(f"%; {selected_scope};%"),
+            ]
+        )
+    return or_(
+        law_sub_sector.is_(None),
+        law_sub_sector == "All",
+        law_sub_sector.ilike("% Core"),
+        *match_conditions,
+    )
+
+
+def compose_control_rows(
+    db: Session,
+    scope: RegulatoryScope | Iterable[RegulatoryScope],
+    include_sebi_listed_overlay: bool = False,
+) -> list[dict[str, object]]:
+    """Return audit-ready rows from Core, sector scope, and optional SEBI overlay.
 
     Identical law titles in a sector workbook are intentionally excluded when a
     canonical Common Core version exists, so Companies Act controls are never
     duplicated in a sector audit.
     """
+    scopes = [scope] if isinstance(scope, RegulatoryScope) else list(scope)
+    if not scopes:
+        return []
+    first_scope = scopes[0]
+    if any(
+        candidate.dataset_key != first_scope.dataset_key
+        or candidate.sector_id != first_scope.sector_id
+        for candidate in scopes
+    ):
+        raise ValueError("All audit sub-sectors must belong to the same sector dataset")
+
     canonical_core_names = _canonical_core_law_names(db)
-    sources = [("common_core", "COMMON_CORE"), (scope.dataset_key, "SECTOR")]
+    sources = [("common_core", "COMMON_CORE"), (first_scope.dataset_key, "SECTOR")]
+    if include_sebi_listed_overlay:
+        sources.append(("sebi_listed", "SEBI_LISTED"))
     result: list[dict[str, object]] = []
 
     for dataset_key, source_scope in sources:
@@ -123,12 +258,43 @@ def compose_control_rows(db: Session, scope: RegulatoryScope) -> list[dict[str, 
         compliance = tables["compliance_requirement_master"]
         audit = tables["audit_procedure_master"]
         law_names = dict(db.execute(select(law.c.law_id, law.c.law_name)).all())
+        matrix_law_ids: set[str] = set()
 
         law_scope = [law.c.active == "Yes"]
         provision_scope = [provision.c.active == "Yes"]
         if source_scope == "SECTOR":
-            law_scope.append(or_(law.c.sub_sector == "All", law.c.sub_sector == scope.sub_sector_name))
-            provision_scope.append(or_(provision.c.sub_sector_id.is_(None), provision.c.sub_sector_id == scope.sub_sector_id))
+            applicability_matrix = tables["applicability_matrix"]
+            matrix_law_ids = set(
+                db.scalars(
+                    select(applicability_matrix.c.law_id).where(
+                        or_(*[
+                            applicability_matrix.c.sub_sector.like(
+                                f"{selected_scope.sub_sector_id}%"
+                            )
+                            for selected_scope in scopes
+                        ])
+                    )
+                ).all()
+            )
+            scope_filters = [
+                _law_scope_filter(
+                    law.c.sub_sector,
+                    selected_scope.sub_sector_name,
+                    selected_scope.sub_sector_id,
+                )
+                for selected_scope in scopes
+            ]
+            if matrix_law_ids:
+                scope_filters.append(law.c.law_id.in_(matrix_law_ids))
+            law_scope.append(
+                or_(*scope_filters)
+            )
+            provision_scope.append(
+                or_(
+                    provision.c.sub_sector_id.is_(None),
+                    provision.c.sub_sector_id.in_([selected_scope.sub_sector_id for selected_scope in scopes]),
+                )
+            )
         # Common Corporate Core is global by design. Its workbook uses its own
         # applicability label rather than a selected sector's sub-sector name.
 
@@ -143,11 +309,29 @@ def compose_control_rows(db: Session, scope: RegulatoryScope) -> list[dict[str, 
         for row in db.execute(statement).mappings():
             if source_scope == "SECTOR" and row[law.c.law_name] in canonical_core_names:
                 continue
+            law_is_sector_wide = _law_scope_is_sector_wide(row[law.c.sub_sector])
+            law_is_sub_sector_specific = not law_is_sector_wide and (
+                any(
+                    _law_scope_includes_sub_sector(
+                        row[law.c.sub_sector],
+                        selected_scope.sub_sector_name,
+                        selected_scope.sub_sector_id,
+                    )
+                    for selected_scope in scopes
+                )
+                or row[law.c.law_id] in matrix_law_ids
+            )
             applicability_scope = (
                 "COMMON_CORE"
                 if source_scope == "COMMON_CORE"
+                else "SEBI_LISTED"
+                if source_scope == "SEBI_LISTED"
                 else "SUB_SECTOR"
-                if row[provision.c.sub_sector_id] == scope.sub_sector_id
+                if (
+                    row[provision.c.sub_sector_id]
+                    in {selected_scope.sub_sector_id for selected_scope in scopes}
+                    or law_is_sub_sector_specific
+                )
                 else "SECTOR_WIDE"
             )
             result.append({

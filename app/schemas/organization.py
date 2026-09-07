@@ -94,6 +94,8 @@ class ClientCreate(BaseModel):
     dataset_key: str
     sector_id: str
     sub_sector_id: str
+    sub_sector_ids: list[str] = Field(default_factory=list)
+    is_listed_company: bool = False
     status: str = "Draft"
     remarks: str | None = None
 
@@ -107,6 +109,8 @@ class ClientUpdate(BaseModel):
     dataset_key: str | None = None
     sector_id: str | None = None
     sub_sector_id: str | None = None
+    sub_sector_ids: list[str] | None = None
+    is_listed_company: bool | None = None
     status: str | None = None
     remarks: str | None = None
 
@@ -122,6 +126,8 @@ class ClientRead(ORMBase):
     dataset_key: str
     sector_id: str
     sub_sector_id: str
+    sub_sector_ids: list[str] = Field(default_factory=list)
+    is_listed_company: bool = False
     status: str
     remarks: str | None = None
     sector_name: str | None = None
