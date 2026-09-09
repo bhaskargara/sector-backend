@@ -154,6 +154,7 @@ def _regulatory_tables(schema_name: str) -> list[Table]:
             index=True,
         ),
         Column("law_name", String, nullable=False, index=True),
+        Column("official_source_url", Text),
         Column("law_compliance_area_map", String),
         Column("applicability_type", String, nullable=False, index=True),
         Column("applicability_trigger", Text),

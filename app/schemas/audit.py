@@ -22,6 +22,18 @@ class AuditEngagementUpdate(BaseModel):
     remarks: str | None = None
 
 
+class AuditReportDetails(BaseModel):
+    signer_name: str | None = Field(default=None, max_length=200)
+    signer_firm_name: str | None = Field(default=None, max_length=200)
+    membership_number: str | None = Field(default=None, max_length=80)
+    certificate_number: str | None = Field(default=None, max_length=80)
+    place: str | None = Field(default=None, max_length=120)
+    report_date: str | None = Field(default=None, max_length=40)
+    board_process_statement: str | None = None
+    material_events: str | None = None
+    prior_observations: str | None = None
+
+
 class AuditItemUpdate(BaseModel):
     status: str | None = Field(
         default=None,
@@ -58,6 +70,7 @@ class AuditEngagementItemRead(ORMBase):
     provision_id: str | None = None
     provision_name: str | None = None
     statutory_reference: str | None = None
+    official_source_url: str | None = None
     compliance_id: str | None = None
     compliance_requirement: str | None = None
     compliance_objective: str | None = None
@@ -106,6 +119,7 @@ class AuditEngagementRead(ORMBase):
     total_items: int
     completed_items: int
     remarks: str | None = None
+    report_details: dict[str, str] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
 
@@ -141,6 +155,7 @@ class AuditProvisionSummary(BaseModel):
     provision_id: str | None = None
     provision_name: str
     statutory_reference: str | None = None
+    official_source_url: str | None = None
     origin_scope: str | None = None
     applicability_scope: str | None = None
     total_items: int

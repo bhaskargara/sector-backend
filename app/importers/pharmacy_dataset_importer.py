@@ -102,6 +102,7 @@ DATASET_SHEETS: dict[str, dict[str, Any]] = {
             "Document Type": "document_type",
             "Parent Law": "parent_law",
             "Law Name": "law_name",
+            "Official Source URL": "official_source_url",
             "Law_ComplianceArea_Map": "law_compliance_area_map",
             "Applicability Type": "applicability_type",
             "Applicability Trigger": "applicability_trigger",
@@ -109,6 +110,7 @@ DATASET_SHEETS: dict[str, dict[str, Any]] = {
             "Review Frequency": "review_frequency",
             "Remarks": "remarks",
         },
+        "optional_columns": ["Official Source URL"],
         "fks": [("parent_law", "Law Master", True)],
     },
     "Law_ComplianceArea_Map": {
@@ -583,6 +585,7 @@ class PharmacyDatasetImporter:
                 "parent_law": self._clean_value(record.get("Parent Law")),
                 "law_name": self._clean_value(record.get("Law Name"))
                 or self._clean_value(record.get("Law Title")),
+                "official_source_url": self._clean_value(record.get("Official Source URL")),
                 "law_compliance_area_map": self._clean_value(record.get("Law_ComplianceArea_Map"))
                 or self._clean_value(record.get("Map ID")),
                 "applicability_type": self._clean_value(record.get("Applicability Type"))

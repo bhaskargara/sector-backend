@@ -9,7 +9,7 @@ from app.models.audit import AuditEngagement, AuditEngagementItem, AuditEvidence
 from app.models.organization import ClientMaster, FirmEnterpriseEngagement, FirmMaster
 from app.repositories.audit_cleanup import UPLOAD_ROOT, delete_audit_snapshot
 from app.repositories.regulatory_runtime import compose_control_rows, get_scopes
-from app.schemas.audit import AuditEngagementCreate, AuditEngagementUpdate, AuditItemUpdate
+from app.schemas.audit import AuditEngagementCreate, AuditEngagementUpdate, AuditItemUpdate, AuditReportDetails
 
 COMPLETED_STATUSES = {"Complied", "Not Applicable"}
 
@@ -189,7 +189,7 @@ def create_audit(db: Session, firm_id: str, payload: AuditEngagementCreate) -> A
                 law_id=row["law_id"], parent_law_id=row["parent_law_id"], parent_law_name=row["parent_law_name"], law_name=row["law_name"],
                 regulator=row["regulator"], authority_level=row["authority_level"], document_type=row["document_type"],
                 applicability_type=row["applicability_type"], applicability_trigger=row["applicability_trigger"],
-                provision_id=row["provision_id"], provision_name=row["provision_name"], statutory_reference=row["statutory_reference"],
+                provision_id=row["provision_id"], provision_name=row["provision_name"], statutory_reference=row["statutory_reference"], official_source_url=row["official_source_url"],
                 compliance_id=row["compliance_id"], compliance_requirement=row["compliance_requirement"], compliance_objective=row["compliance_objective"], compliance_frequency=row["compliance_frequency"],
                 audit_procedure_id=row["audit_procedure_id"], audit_procedure=row["audit_procedure"], audit_method=row["audit_method"], audit_frequency=row["audit_frequency"],
                 evidence_template=row["evidence_template"], evidence_type=row["evidence_type"], evidence_mandatory=row["evidence_mandatory"], observation_template=row["observation_template"],
@@ -218,6 +218,26 @@ def update_audit(
     _ensure_unlocked(engagement)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(engagement, field, value)
+    db.commit()
+    db.refresh(engagement)
+    return engagement
+
+
+def update_audit_report_details(
+    db: Session,
+    firm_id: str,
+    audit_id: str,
+    payload: AuditReportDetails,
+) -> AuditEngagement | None:
+    engagement = get_audit(db, firm_id, audit_id)
+    if not engagement:
+        return None
+    _ensure_unlocked(engagement)
+    engagement.report_details = {
+        key: value.strip()
+        for key, value in payload.model_dump().items()
+        if isinstance(value, str) and value.strip()
+    }
     db.commit()
     db.refresh(engagement)
     return engagement
@@ -287,6 +307,7 @@ def list_audit_provision_summaries(
         AuditEngagementItem.provision_id,
         func.coalesce(AuditEngagementItem.provision_name, "Provision").label("provision_name"),
         func.max(AuditEngagementItem.statutory_reference).label("statutory_reference"),
+        func.max(AuditEngagementItem.official_source_url).label("official_source_url"),
         func.max(AuditEngagementItem.source_scope).label("origin_scope"),
         case(
             (func.count(func.distinct(AuditEngagementItem.applicability_scope)) > 1, "Mixed"),

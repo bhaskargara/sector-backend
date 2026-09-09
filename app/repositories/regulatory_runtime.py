@@ -350,6 +350,7 @@ def compose_control_rows(
                 "provision_id": row[provision.c.provision_id],
                 "provision_name": row[provision.c.provision_name],
                 "statutory_reference": row[provision.c.statutory_reference],
+                "official_source_url": row[law.c.official_source_url],
                 "origin": row[provision.c.origin],
                 "compliance_id": row[compliance.c.compliance_id],
                 "compliance_requirement": row[compliance.c.compliance_requirement],

@@ -13,11 +13,12 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import delete
+from sqlalchemy import delete, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.database import SessionLocal
 from app.importers.pharmacy_dataset_importer import ImportSummary
+from app.models.audit import AuditEngagementItem
 from app.models.regulatory_v2 import iter_regulatory_tables
 
 
@@ -183,12 +184,13 @@ def import_sebi_listed_overlay(workbook_path: str, mode: str = "upsert") -> Impo
                 "document_type": "SEBI Act / Regulation / Circular",
                 "parent_law": None,
                 "law_name": _value(record, "Current Instrument"),
+                "official_source_url": _value(record, "Official Source URL"),
                 "law_compliance_area_map": None,
                 "applicability_type": "Conditional",
                 "applicability_trigger": _value(record, "Activation Gate"),
                 "active": "Yes",
                 "review_frequency": None,
-                "remarks": _value(record, "Official Source URL"),
+                "remarks": None,
             }
             for record in source["laws"]
         ],
@@ -313,6 +315,18 @@ def import_sebi_listed_overlay(workbook_path: str, mode: str = "upsert") -> Impo
             count = _upsert_rows(db, tables[table_name], records[table_name], mode)
             summary.rows_inserted[table_name] = count
             summary.rows_skipped[table_name] = 0
+
+        # Audit items are snapshots. Refresh SEBI links after an import so
+        # existing listed-company audits receive the official source too.
+        law_master = tables["law_master"]
+        db.execute(
+            update(AuditEngagementItem)
+            .where(
+                AuditEngagementItem.dataset_key == SEBI_DATASET_KEY,
+                AuditEngagementItem.law_id == law_master.c.law_id,
+            )
+            .values(official_source_url=law_master.c.official_source_url)
+        )
         summary.status = "success"
         summary.completed_at = datetime.now(UTC)
         db.commit()

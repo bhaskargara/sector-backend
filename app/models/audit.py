@@ -43,6 +43,7 @@ class AuditEngagement(TimestampMixin, Base):
     total_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     completed_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     remarks: Mapped[str | None] = mapped_column(Text)
+    report_details: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False, default=dict)
 
     firm: Mapped[FirmMaster] = relationship()
     client: Mapped[ClientMaster] = relationship()
@@ -70,6 +71,7 @@ class AuditEngagementItem(TimestampMixin, Base):
     provision_id: Mapped[str | None] = mapped_column(index=True)
     provision_name: Mapped[str | None]
     statutory_reference: Mapped[str | None] = mapped_column(index=True)
+    official_source_url: Mapped[str | None] = mapped_column(Text)
     compliance_id: Mapped[str | None] = mapped_column(index=True)
     compliance_requirement: Mapped[str | None] = mapped_column(Text)
     compliance_objective: Mapped[str | None] = mapped_column(Text)

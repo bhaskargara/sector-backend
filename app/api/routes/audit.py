@@ -1,7 +1,8 @@
+from io import BytesIO
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -24,6 +25,7 @@ from app.repositories.audit_repository import (
     set_audit_lock,
     update_audit,
     update_audit_item,
+    update_audit_report_details,
 )
 from app.schemas.audit import (
     AuditEngagementCreate,
@@ -37,7 +39,9 @@ from app.schemas.audit import (
     AuditItemUpdate,
     AuditProvisionSummary,
     PlatformAuditRead,
+    AuditReportDetails,
 )
+from app.services.audit_report_pdf import build_audit_report_pdf, report_filename
 
 router = APIRouter(tags=["audit"])
 
@@ -103,6 +107,93 @@ def get_firm_audit_laws(firm_id: str, audit_id: str, db: Session = Depends(get_d
         raise not_found(f"Audit not found: {audit_id}")
     ensure_audit_metadata(db, audit_id)
     return [AuditLawSummary(**law) for law in list_audit_law_summaries(db, audit_id)]
+
+
+@router.get(
+    "/firms/{firm_id}/audits/{audit_id}/report-items",
+    response_model=list[AuditEngagementItemRead],
+)
+def get_firm_audit_report_items(
+    firm_id: str,
+    audit_id: str,
+    db: Session = Depends(get_db),
+):
+    """Return the saved audit snapshot only when a report is opened."""
+    engagement = get_audit(db, firm_id, audit_id)
+    if not engagement:
+        raise not_found(f"Audit not found: {audit_id}")
+    return [AuditEngagementItemRead.model_validate(item) for item in list_audit_items(db, audit_id)]
+
+
+@router.get(
+    "/firms/{firm_id}/audits/{audit_id}/report-details",
+    response_model=AuditReportDetails,
+)
+def get_firm_audit_report_details(
+    firm_id: str,
+    audit_id: str,
+    db: Session = Depends(get_db),
+):
+    engagement = get_audit(db, firm_id, audit_id)
+    if not engagement:
+        raise not_found(f"Audit not found: {audit_id}")
+    return AuditReportDetails(**(engagement.report_details or {}))
+
+
+@router.patch(
+    "/firms/{firm_id}/audits/{audit_id}/report-details",
+    response_model=AuditReportDetails,
+)
+def patch_firm_audit_report_details(
+    firm_id: str,
+    audit_id: str,
+    payload: AuditReportDetails,
+    db: Session = Depends(get_db),
+):
+    try:
+        engagement = update_audit_report_details(db, firm_id, audit_id, payload)
+    except AuditLockedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if not engagement:
+        raise not_found(f"Audit not found: {audit_id}")
+    return AuditReportDetails(**engagement.report_details)
+
+
+@router.get("/firms/{firm_id}/audits/{audit_id}/reports/{report_type}.pdf")
+def download_firm_audit_report(
+    firm_id: str,
+    audit_id: str,
+    report_type: str,
+    inline: bool = False,
+    db: Session = Depends(get_db),
+):
+    if report_type not in {"mr3", "compliance"}:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown report type")
+    engagement = get_audit(db, firm_id, audit_id)
+    if not engagement:
+        raise not_found(f"Audit not found: {audit_id}")
+    laws = list_audit_law_summaries(db, audit_id)
+    if report_type == "compliance" and not any(
+        law.get("applicability_scope") == "SEBI_LISTED" for law in laws
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The Compliance Audit Report is available only for listed-company audits.",
+        )
+    content = build_audit_report_pdf(
+        engagement=engagement,
+        items=list_audit_items(db, audit_id),
+        laws=laws,
+        report_type=report_type,
+    )
+    filename = report_filename(engagement.client_name, engagement.audit_period_label, report_type)
+    return StreamingResponse(
+        BytesIO(content),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'{"inline" if inline else "attachment"}; filename="{filename}"'
+        },
+    )
 
 
 @router.get(
